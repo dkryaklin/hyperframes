@@ -78,8 +78,26 @@ mock.module("@hyperframes/engine", () => ({
     _opts: unknown,
     _hook: unknown,
     signal?: AbortSignal,
+    onProgress?: (progress: unknown) => void,
   ) => {
     if (hangParallelUntilAbort) {
+      onProgress?.({
+        totalFrames: 100,
+        capturedFrames: 0,
+        activeWorkers: 2,
+        workerProgress: new Map([
+          [0, 0],
+          [1, 0],
+        ]),
+        latestWorkerPhase: {
+          workerId: 0,
+          phase: "session_init",
+          browserExecutable: "C:/Chrome/chrome.exe",
+          browserVersion: "Chrome/152.0.7977.30",
+          canvasDrawElement: true,
+          gpuBackend: "d3d11/nvidia",
+        },
+      });
       // Simulate a wedged worker: make no frame progress, then reject with the
       // pool's generic string once aborted (by the parent or the watchdog).
       await new Promise<void>((_resolve, reject) => {
@@ -276,6 +294,8 @@ describe("runCaptureStreamingStage", () => {
     // A stalled render must surface as a stall (→ pinned fallback), never as
     // the raw "[Parallel] Capture failed" or a cancellation.
     expect((caught as Error).message).toContain("stalled");
+    expect((caught as Error).message).toContain("phase=session_init");
+    expect((caught as Error).message).toContain("Chrome/152.0.7977.30");
     // Parent signal never fired, so the orchestrator won't read this as a cancel.
     expect(input.abortSignal).toBeUndefined();
   });

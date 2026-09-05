@@ -706,6 +706,12 @@ export async function runCaptureStreamingStage(
       const stallTimeoutMs = resolveCaptureStallTimeoutMs();
       let lastCapturedFrames = 0;
       let lastProgressAt = Date.now();
+      const workerPhases = new Map<number, string>();
+      const phaseSummary = () =>
+        [...workerPhases.entries()]
+          .sort(([left], [right]) => left - right)
+          .map(([workerId, detail]) => `worker=${workerId} ${detail}`)
+          .join("; ");
       let stalled = false;
       const stallTimer = setInterval(
         () => {
@@ -713,7 +719,8 @@ export async function runCaptureStreamingStage(
           stalled = true;
           const stallErr = new Error(
             `[Render] Parallel drawElement capture stalled: no frame progress for ${stallTimeoutMs}ms ` +
-              `(stuck at ${lastCapturedFrames}/${totalFrames}).`,
+              `(stuck at ${lastCapturedFrames}/${totalFrames}).` +
+              (workerPhases.size > 0 ? ` Last worker phases: ${phaseSummary()}.` : ""),
           );
           reorderBuffer.abort(stallErr);
           stallController.abort();
@@ -731,6 +738,24 @@ export async function runCaptureStreamingStage(
           createRenderVideoFrameInjector,
           stallController.signal,
           (progress) => {
+            if (progress.latestWorkerPhase) {
+              const phase = progress.latestWorkerPhase;
+              const detail =
+                `phase=${phase.phase} frame=${phase.frameIndex ?? "n/a"} ` +
+                `browser=${phase.browserExecutable} version=${phase.browserVersion} ` +
+                `CanvasDrawElement=${phase.canvasDrawElement} gpu=${phase.gpuBackend}`;
+              workerPhases.set(phase.workerId, detail);
+              log.info("[Render] Parallel capture worker phase", {
+                workerId: phase.workerId,
+                phase: phase.phase,
+                frameIndex: phase.frameIndex,
+                browserExecutable: phase.browserExecutable,
+                browserVersion: phase.browserVersion,
+                canvasDrawElement: phase.canvasDrawElement,
+                gpuBackend: phase.gpuBackend,
+              });
+              return;
+            }
             if (progress.capturedFrames > lastCapturedFrames) {
               lastCapturedFrames = progress.capturedFrames;
               lastProgressAt = Date.now();
@@ -776,7 +801,8 @@ export async function runCaptureStreamingStage(
           throw new Error(
             `[Render] Parallel drawElement capture stalled after ${stallTimeoutMs}ms with no ` +
               `frame progress (last frame ${lastCapturedFrames}/${totalFrames}); ` +
-              `falling back to screenshot.`,
+              `falling back to screenshot.` +
+              (workerPhases.size > 0 ? ` Last worker phases: ${phaseSummary()}.` : ""),
           );
         }
         throw err;
