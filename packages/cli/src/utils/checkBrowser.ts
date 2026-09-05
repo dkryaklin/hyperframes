@@ -13,7 +13,11 @@ import {
   seekCompositionTimeline,
   waitForPreferredSeekTarget,
 } from "../capture/captureCompositionFrame.js";
-import { auditClipDurations, shouldIgnoreRequestFailure } from "../commands/validate.js";
+import {
+  auditClipDurations,
+  shouldIgnoreHttpError,
+  shouldIgnoreRequestFailure,
+} from "../commands/validate.js";
 import { loadBrowserScript } from "../commands/layout.js";
 import { normalizeErrorMessage } from "./errorMessage.js";
 import { ambiguousIssue, type MotionFrame } from "./motionAudit.js";
@@ -381,6 +385,7 @@ function wireNetworkListeners(page: Page, drafts: RuntimeDraft[], currentTime: (
     if (response.status() < 400) return;
     const url = response.url();
     if (url.includes("favicon")) return;
+    if (shouldIgnoreHttpError(url, response.status())) return;
     drafts.push({
       code: "http_error",
       severity: "error",

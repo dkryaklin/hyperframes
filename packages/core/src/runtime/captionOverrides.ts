@@ -27,6 +27,20 @@ interface CaptionOverride {
   fontFamily?: string;
 }
 
+function isCaptionOverride(value: unknown): value is CaptionOverride {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function parseCaptionOverridePayload(value: unknown): CaptionOverride[] {
+  if (!Array.isArray(value)) {
+    throw new Error("expected a JSON array");
+  }
+  if (!value.every(isCaptionOverride)) {
+    throw new Error("every array entry must be an object");
+  }
+  return value;
+}
+
 interface GsapTween {
   vars: Record<string, unknown>;
   startTime(): number;
@@ -109,13 +123,15 @@ export function applyCaptionOverrides(): void {
       if (!r.ok) return null;
       return r.json();
     })
-    .then((data: CaptionOverride[] | null) => {
-      if (!data || !Array.isArray(data) || data.length === 0) return;
+    .then((data: unknown) => {
+      if (data === null) return;
+      const overrides = parseCaptionOverridePayload(data);
+      if (overrides.length === 0) return;
 
       // Build word element index for wordIndex fallback
       const wordEls = getCaptionWordElements();
 
-      for (const override of data) {
+      for (const override of overrides) {
         let el: HTMLElement | null = null;
         if (override.wordId) {
           el = resolveCaptionWordElement(document.getElementById(override.wordId));
@@ -191,5 +207,8 @@ export function applyCaptionOverrides(): void {
         }
       }
     })
-    .catch(() => {});
+    .catch((error: unknown) => {
+      const message = error instanceof Error ? error.message : String(error);
+      console.error(`[HyperFrames] Invalid caption-overrides.json: ${message}`);
+    });
 }
