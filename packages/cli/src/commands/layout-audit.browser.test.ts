@@ -1025,6 +1025,38 @@ describe("layout-audit.browser coordinate-frame findings", () => {
     expect(runAudit().filter((issue) => issue.code === "connector_detached")).toEqual([]);
   });
 
+  it("flags a long marked shaft whose rendered ends miss every node", () => {
+    document.body.innerHTML = `
+      <div id="root" data-composition-id="main" data-width="1920" data-height="1080">
+        <div id="n1"></div>
+        <div id="n2"></div>
+        <svg id="schematic-svg">
+          <defs><marker id="arrowhead"><path id="tip" d="M 0 0 L 8 4 L 0 8" /></marker></defs>
+          <path id="path-input" d="M 40 540 L 720 540" marker-end="url(#arrowhead)" />
+        </svg>
+      </div>
+    `;
+    installGeometry(
+      {
+        root: rect({ left: 0, top: 0, width: 1920, height: 1080 }),
+        n1: rect({ left: 900, top: 400, width: 160, height: 160 }),
+        n2: rect({ left: 1400, top: 400, width: 160, height: 160 }),
+        "schematic-svg": rect({ left: 0, top: 0, width: 1920, height: 1080 }),
+      },
+      {
+        n1: { backgroundColor: "rgb(30, 40, 50)" },
+        n2: { backgroundColor: "rgb(30, 40, 50)" },
+      },
+    );
+    installConnectorGeometry({ e: 0, f: 0 });
+    installAuditScript();
+
+    const issues = runAudit().filter((issue) => issue.code === "connector_detached");
+    expect(issues).toHaveLength(1);
+    expect(issues[0]).toMatchObject({ selector: "#path-input" });
+    expect(issues[0]?.message).toContain("marked shaft that meets no node");
+  });
+
   // Same DOM node via painted-inside + compact-near-miss must share one identity (not p0 vs c0).
   it("skips same-anchor cross-tier arrows that only graze one node", () => {
     document.body.innerHTML = `

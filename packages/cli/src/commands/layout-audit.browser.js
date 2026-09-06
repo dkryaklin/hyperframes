@@ -1326,7 +1326,16 @@
         // Paste-into-`d` bug: both raw endpoints land on distinct anchors as screen pixels.
         const userStartKey = attachmentKey(user.start);
         const userEndKey = attachmentKey(user.end);
-        if (!userStartKey || !userEndKey || userStartKey === userEndKey) continue;
+        const pasteBug = Boolean(userStartKey && userEndKey && userStartKey !== userEndKey);
+        // Guessed marked shaft: both frames miss. Same-anchor grazes attach in user-space
+        // and must stay skipped. Name-only decorative flow/arrow paths stay skipped.
+        // 80px keeps short marker glyphs (chevrons, tips) out.
+        const markedMiss =
+          renderedChord >= 80 &&
+          !userStartKey &&
+          !userEndKey &&
+          (path.hasAttribute("marker-start") || path.hasAttribute("marker-end"));
+        if (!pasteBug && !markedMiss) continue;
         const gap = Math.round(
           Math.min(
             Math.min(...anchors.compact.map((a) => distanceToRect(rendered.start, a.rect))),
@@ -1339,7 +1348,9 @@
           time,
           selector: selectorFor(path),
           containerSelector: selectorFor(svg),
-          message: `Connector path endpoints render ${gap}px from the nearest anchorable element, but the path's user-space coordinates would attach if read as screen pixels — screen/viewport numbers were likely written into SVG \`d\` without inverting the CTM.`,
+          message: pasteBug
+            ? `Connector path endpoints render ${gap}px from the nearest anchorable element, but the path's user-space coordinates would attach if read as screen pixels — screen/viewport numbers were likely written into SVG \`d\` without inverting the CTM.`
+            : `Connector path endpoints render ${gap}px from the nearest anchorable element — a marked shaft that meets no node.`,
           rect: toRect({
             left: Math.min(rendered.start.x, rendered.end.x),
             top: Math.min(rendered.start.y, rendered.end.y),
@@ -1348,8 +1359,9 @@
             width: Math.abs(rendered.end.x - rendered.start.x),
             height: Math.abs(rendered.end.y - rendered.start.y),
           }),
-          fixHint:
-            "Convert measured screen coordinates into the SVG's user space (subtract the SVG rect / invert getScreenCTM) before writing path `d`, and keep the SVG a direct child of the stage.",
+          fixHint: pasteBug
+            ? "Convert measured screen coordinates into the SVG's user space (subtract the SVG rect / invert getScreenCTM) before writing path `d`, and keep the SVG a direct child of the stage."
+            : "Measure the settled node boxes and write `d` in the SVG's user space (invert getScreenCTM), or grow a layout-owned shaft from the source node.",
         });
       }
     }
