@@ -1228,6 +1228,40 @@ describe("initSandboxRuntimeModular", () => {
     expect(video.style.visibility).toBe("visible");
   });
 
+  it("keeps an overlapping numeric media start local to its delayed host", () => {
+    const root = document.createElement("div");
+    root.setAttribute("data-composition-id", "main");
+    root.setAttribute("data-root", "true");
+    root.setAttribute("data-duration", "10");
+    document.body.appendChild(root);
+
+    const host = document.createElement("div");
+    host.setAttribute("data-composition-id", "nested");
+    host.setAttribute("data-composition-file", "nested.html");
+    host.setAttribute("data-start", "2");
+    host.setAttribute("data-duration", "6");
+    root.appendChild(host);
+
+    const video = document.createElement("video");
+    video.setAttribute("data-start", "2");
+    video.setAttribute("data-duration", "2");
+    video.load = () => {};
+    host.appendChild(video);
+
+    window.__timelines = {
+      main: createMockTimeline(10),
+      nested: createMockTimeline(6),
+    };
+
+    initSandboxRuntimeModular();
+
+    expect(window.__hfResolveMediaStartSeconds?.(video)).toBe(4);
+    window.__player?.renderSeek(2.5);
+    expect(video.style.visibility).toBe("hidden");
+    window.__player?.renderSeek(4.5);
+    expect(video.style.visibility).toBe("visible");
+  });
+
   it("keeps a long video starting at zero local to its delayed composition host", () => {
     const root = document.createElement("div");
     root.setAttribute("data-composition-id", "main");
@@ -2015,6 +2049,7 @@ describe("initSandboxRuntimeModular", () => {
     // pip-wired video: data-start is authored in global time (same value as host)
     const pipVideo = document.createElement("video");
     pipVideo.setAttribute("data-start", "45.40");
+    pipVideo.setAttribute("data-hf-media-start-basis", "global");
     pipVideo.setAttribute("data-duration", "7.06");
     Object.defineProperty(pipVideo, "paused", { value: true, configurable: true });
     Object.defineProperty(pipVideo, "readyState", { value: 0, configurable: true });

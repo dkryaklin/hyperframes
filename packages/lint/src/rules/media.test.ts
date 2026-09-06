@@ -410,6 +410,39 @@ describe("media rules", () => {
     expect(finding).toBeUndefined();
   });
 
+  it("warns that an unmarked nonzero nested media start is local", async () => {
+    const html = `<template>
+  <div data-composition-id="scene" data-width="1920" data-height="1080">
+    <video id="clip" src="clip.mp4" data-start="2" data-duration="2" muted></video>
+  </div>
+</template>`;
+    const result = await lintHyperframeHtml(html, { isSubComposition: true });
+    const finding = result.findings.find(
+      (item) => item.code === "nested_media_start_basis_ambiguous",
+    );
+
+    expect(finding?.severity).toBe("warning");
+    expect(finding?.message).toContain("local to its composition");
+    expect(finding?.fixHint).toContain('data-hf-media-start-basis="global"');
+  });
+
+  it.each([
+    ['data-start="0"', "zero local start"],
+    ['data-start="2" data-hf-media-start-basis="local"', "explicit local start"],
+    ['data-start="2" data-hf-media-start-basis="global"', "explicit legacy-global start"],
+  ])("does not warn for %s (%s)", async (attrs) => {
+    const html = `<template>
+  <div data-composition-id="scene" data-width="1920" data-height="1080">
+    <audio id="clip" src="clip.wav" ${attrs} data-duration="2"></audio>
+  </div>
+</template>`;
+    const result = await lintHyperframeHtml(html, { isSubComposition: true });
+
+    expect(result.findings.some((item) => item.code === "nested_media_start_basis_ambiguous")).toBe(
+      false,
+    );
+  });
+
   it("reports error for media with crossorigin (breaks preview when host omits CORS)", async () => {
     const html = `
 <html><body>

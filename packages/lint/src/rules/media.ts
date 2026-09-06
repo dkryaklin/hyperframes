@@ -125,6 +125,29 @@ function findMediaSrcKindMismatchFindings(ctx: LintContext): HyperframeLintFindi
   return findings;
 }
 
+function findNestedMediaStartBasisFindings(ctx: LintContext): HyperframeLintFinding[] {
+  if (!ctx.options.isSubComposition) return [];
+  const findings: HyperframeLintFinding[] = [];
+  for (const tag of ctx.tags) {
+    if (tag.name !== "video" && tag.name !== "audio") continue;
+    const rawStart = readAttr(tag.raw, "data-start");
+    const start = rawStart == null || rawStart.trim() === "" ? NaN : Number(rawStart);
+    if (!Number.isFinite(start) || start <= 0) continue;
+    const basis = readAttr(tag.raw, "data-hf-media-start-basis");
+    if (basis === "local" || basis === "global") continue;
+    const elementId = readAttr(tag.raw, "id") || undefined;
+    findings.push({
+      code: "nested_media_start_basis_ambiguous",
+      severity: "warning",
+      message: `<${tag.name}${elementId ? ` id="${elementId}"` : ""}> has data-start="${rawStart}" inside a sub-composition. Nested media timing is local to its composition by default; a nonzero value can be confused with a legacy root-global timestamp.`,
+      elementId,
+      fixHint: `Keep data-start="${rawStart}" if it is composition-local. If this is a legacy root-global timestamp, add data-hf-media-start-basis="global"; otherwise convert it to local time by subtracting the host start.`,
+      snippet: truncateSnippet(tag.raw),
+    });
+  }
+  return findings;
+}
+
 /** Parent `src`, else a descendant `<source src>` (matches engine resolveMediaElementSrc). */
 function mediaHasResolvableSrc(tag: OpenTag, tags: readonly OpenTag[]): boolean {
   if (readAttr(tag.raw, "src")) return true;
@@ -323,6 +346,7 @@ function findImperativeMediaControlFindings(ctx: LintContext): HyperframeLintFin
 }
 
 export const mediaRules: Array<(ctx: LintContext) => HyperframeLintFinding[]> = [
+  findNestedMediaStartBasisFindings,
   // duplicate_media_id + duplicate_media_discovery_risk
   ({ tags }) => {
     const findings: HyperframeLintFinding[] = [];

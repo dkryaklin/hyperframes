@@ -68,6 +68,10 @@ import { installStudioCustomEase } from "./customEase";
 import { parseNumeric } from "./startExpression";
 import { parseStrictFiniteTimingNumber } from "./playbackRate";
 import {
+  MEDIA_START_BASIS_ATTR,
+  resolveAbsoluteMediaStartSeconds as resolveAuthoredMediaStartSeconds,
+} from "../mediaTiming";
+import {
   clearRuntimeData,
   setRuntimeData,
   setRuntimeDataAppliedReporter,
@@ -691,18 +695,11 @@ export function initSandboxRuntimeModular(): void {
       return resolveStartForElement(element, inheritedStart);
     }
 
-    // Both timing conventions exist in shipped projects:
-    //   - composition-local media, e.g. host@20 + video@0 => root@20
-    //   - legacy root-global PIP media, e.g. host@45.4 + video@45.4 => root@45.4
-    // Preserve the global value when its authored start already falls inside
-    // the host's absolute window. A long local clip can overlap that window
-    // even when its start is local (host@39.233 + video@0/duration=80), so the
-    // duration cannot disambiguate the timing convention.
-    const hostDuration = context.inheritedDuration;
-    const hostEnd = hostDuration != null && hostDuration > 0 ? inheritedStart + hostDuration : null;
-    const startsInsideHostWindow =
-      authoredStart >= inheritedStart && (hostEnd == null || authoredStart < hostEnd);
-    return startsInsideHostWindow ? authoredStart : inheritedStart + authoredStart;
+    return resolveAuthoredMediaStartSeconds({
+      authoredStart,
+      hostStart: inheritedStart,
+      basis: element.getAttribute(MEDIA_START_BASIS_ATTR),
+    });
   };
 
   window.__hfResolveMediaStartSeconds = resolveAbsoluteMediaStartSeconds;
