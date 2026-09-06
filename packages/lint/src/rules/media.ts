@@ -1,6 +1,8 @@
 import type { LintContext, HyperframeLintFinding, OpenTag } from "../context";
 import { readAttr, readDecodedAttr, stripJsComments, truncateSnippet, isMediaTag } from "../utils";
 import { validateColorGradingContract } from "@hyperframes/parsers/color-grading-contract";
+import { extractMediaSrcMutations } from "@hyperframes/parsers";
+import { parseHTML } from "linkedom";
 
 /**
  * Does the GSAP call that names `#id` also set `volume` in the same call?
@@ -319,6 +321,46 @@ function findImperativeMediaControlFindings(ctx: LintContext): HyperframeLintFin
     }
   }
 
+  return findings;
+}
+
+function findRuntimeMediaSrcMutationFindings(ctx: LintContext): HyperframeLintFinding[] {
+  const { document } = parseHTML(ctx.source);
+  const findings: HyperframeLintFinding[] = [];
+  for (const script of ctx.scripts) {
+    for (const mutation of extractMediaSrcMutations(script.content)) {
+      let targets: Element[];
+      try {
+        const id = /^#[A-Za-z_][\w-]*$/.test(mutation.selector) ? mutation.selector.slice(1) : null;
+        const idTarget = id ? document.getElementById(id) : null;
+        targets = id
+          ? idTarget
+            ? [idTarget]
+            : []
+          : [...document.querySelectorAll(mutation.selector)];
+      } catch {
+        continue;
+      }
+      const mediaTargets = targets
+        .map((element) => {
+          const name = element.tagName.toLowerCase();
+          if (name === "video" || name === "audio") return element;
+          return name === "source" ? element.closest("video, audio") : null;
+        })
+        .filter((element): element is Element => element !== null);
+      if (mediaTargets.length === 0) continue;
+      findings.push({
+        code: "media_runtime_src_mutation",
+        severity: "warning",
+        message: `Inline script mutates the source of existing managed media via ${mutation.operation === "src_assignment" ? ".src assignment" : "setAttribute('src', ...)"}. Browser probing can reconcile synchronous writes, but external or delayed writes can still diverge between preview and extraction.`,
+        elementId: mediaTargets[0]?.getAttribute("id") || undefined,
+        selector: mutation.selector,
+        fixHint:
+          "Author the final static src, or bind data-var-src to a declared image/string variable so the selected source is applied before media discovery and extraction.",
+        snippet: truncateSnippet(mutation.raw),
+      });
+    }
+  }
   return findings;
 }
 
@@ -727,6 +769,7 @@ export const mediaRules: Array<(ctx: LintContext) => HyperframeLintFinding[]> = 
 
   // imperative_media_control
   findImperativeMediaControlFindings,
+  findRuntimeMediaSrcMutationFindings,
 
   // audio_volume_double_automation
   findVolumeDoubleAutomationFindings,

@@ -1,4 +1,5 @@
 import { describe, expect, it, mock } from "bun:test";
+import { createHash } from "node:crypto";
 import {
   hasAutoStartVideos,
   hasScriptedAudioVolumeAutomation,
@@ -577,6 +578,113 @@ describe("runProbeStage — forceScreenshot threading", () => {
       audio.src = "music.mp3";
       document.body.appendChild(audio);
     </script>`;
+
+    await runProbeStage(input);
+
+    expect(capturedCfgs.length).toBeGreaterThan(0);
+  });
+
+  it("probes and reconciles synchronous src mutations on existing video and audio", async () => {
+    resetRetryMocks();
+    capturedCfgs.length = 0;
+    const hash = (value: string) => createHash("sha256").update(value).digest("hex");
+    const videoA = `assets/video-a-${hash("sanitized-video-a")}.mp4`;
+    const videoB = `assets/video-b-${hash("sanitized-video-b")}.mp4`;
+    const audioA = `assets/audio-a-${hash("sanitized-audio-a")}.wav`;
+    const audioB = `assets/audio-b-${hash("sanitized-audio-b")}.wav`;
+    expect(hash("sanitized-video-a")).not.toBe(hash("sanitized-video-b"));
+    expect(hash("sanitized-audio-a")).not.toBe(hash("sanitized-audio-b"));
+    browserMediaResults = [
+      {
+        id: "clip",
+        tagName: "video",
+        src: videoB,
+        start: 0,
+        end: 5,
+        duration: 5,
+        mediaStart: 0,
+        loop: false,
+        hasAudio: false,
+        volume: 1,
+        muted: true,
+      },
+      {
+        id: "voice",
+        tagName: "audio",
+        src: audioB,
+        start: 0,
+        end: 5,
+        duration: 5,
+        mediaStart: 0,
+        loop: false,
+        hasAudio: true,
+        volume: 1,
+        muted: false,
+      },
+    ];
+    const { runProbeStage } = await import("./probeStage.js");
+    const input = makeProbeInput({});
+    input.composition.duration = 5;
+    input.composition.videos.push({
+      id: "clip",
+      src: videoA,
+      start: 0,
+      end: 5,
+      mediaStart: 0,
+      loop: false,
+      hasAudio: false,
+    });
+    input.composition.audios.push({
+      id: "voice",
+      src: audioA,
+      start: 0,
+      end: 5,
+      mediaStart: 0,
+      layer: 0,
+      volume: 1,
+      type: "audio",
+    });
+    input.compiled.html = `<video id="clip" src="${videoA}"></video>
+      <audio id="voice" src="${audioA}"></audio>
+      <script>
+        const clip = document.getElementById("clip");
+        clip.src = ${JSON.stringify(videoB)};
+        document.querySelector("#voice").setAttribute("src", ${JSON.stringify(audioB)});
+      </script>`;
+
+    await runProbeStage(input);
+
+    expect(capturedCfgs.length).toBeGreaterThan(0);
+    expect(input.composition.videos[0]?.src).toBe(videoB);
+    expect(input.composition.audios[0]?.src).toBe(audioB);
+    expect(mediaPreflightComposition).toBe(input.composition);
+  });
+
+  it("does not probe for img or script src mutations", async () => {
+    resetRetryMocks();
+    capturedCfgs.length = 0;
+    const { runProbeStage } = await import("./probeStage.js");
+    const input = makeProbeInput({});
+    input.composition.duration = 5;
+    input.compiled.html = `<img id="poster" src="a.png"><script id="loader"></script>
+      <script>
+        document.getElementById("poster").src = "b.png";
+        document.getElementById("loader").setAttribute("src", "loader-b.js");
+      </script>`;
+
+    await runProbeStage(input);
+
+    expect(capturedCfgs).toHaveLength(0);
+  });
+
+  it("probes when a source child of existing media is mutated", async () => {
+    resetRetryMocks();
+    capturedCfgs.length = 0;
+    const { runProbeStage } = await import("./probeStage.js");
+    const input = makeProbeInput({});
+    input.composition.duration = 5;
+    input.compiled.html = `<video id="clip"><source id="clip-source" src="video-a.mp4"></video>
+      <script>document.getElementById("clip-source").src = "video-b.mp4";</script>`;
 
     await runProbeStage(input);
 
