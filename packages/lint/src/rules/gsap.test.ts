@@ -3,6 +3,100 @@ import { describe, it, expect } from "vitest";
 import { lintHyperframeHtml } from "../hyperframeLinter.js";
 
 describe("GSAP rules", () => {
+  it("warns when a GSAP color tween uses an undefined CSS variable", async () => {
+    const html = `
+<html><body>
+  <div data-composition-id="c1" data-width="1920" data-height="1080">
+    <h1 id="title">Visible text</h1>
+  </div>
+  <script>
+    const tl = gsap.timeline({ paused: true });
+    tl.to("#title", { color: "var(--accent2)", duration: 0.5 }, 0);
+    window.__timelines = { c1: tl };
+  </script>
+</body></html>`;
+
+    const result = await lintHyperframeHtml(html);
+    expect(
+      result.findings.find((finding) => finding.code === "gsap_undefined_css_variable"),
+    ).toMatchObject({
+      severity: "warning",
+      selector: "#title",
+    });
+  });
+
+  it("checks both ends of a fromTo color tween", async () => {
+    const html = `
+<html><body>
+  <div data-composition-id="c1" data-width="1920" data-height="1080"><h1 id="title">Text</h1></div>
+  <script>
+    const tl = gsap.timeline({ paused: true });
+    tl.fromTo("#title", { color: "var(--missing-from)" }, { color: "#fff", duration: 0.5 }, 0);
+    window.__timelines = { c1: tl };
+  </script>
+</body></html>`;
+
+    const result = await lintHyperframeHtml(html);
+    expect(
+      result.findings.find((finding) => finding.code === "gsap_undefined_css_variable")?.message,
+    ).toContain("--missing-from");
+  });
+
+  it.each([
+    ["style block", `<style>:root { --accent2: #ff3366; }</style>`],
+    ["inline style", `<div style="--accent2: #ff3366"></div>`],
+  ])("accepts a GSAP CSS variable defined in a %s", async (_source, definition) => {
+    const html = `
+<html><head>${definition}</head><body>
+  <div data-composition-id="c1" data-width="1920" data-height="1080"><h1 id="title">Text</h1></div>
+  <script>
+    const tl = gsap.timeline({ paused: true });
+    tl.to("#title", { color: "var(--accent2)", duration: 0.5 }, 0);
+    window.__timelines = { c1: tl };
+  </script>
+</body></html>`;
+
+    const result = await lintHyperframeHtml(html);
+    expect(
+      result.findings.find((finding) => finding.code === "gsap_undefined_css_variable"),
+    ).toBeUndefined();
+  });
+
+  it("accepts an undefined CSS variable with a var() fallback", async () => {
+    const html = `
+<html><body>
+  <div data-composition-id="c1" data-width="1920" data-height="1080"><h1 id="title">Text</h1></div>
+  <script>
+    const tl = gsap.timeline({ paused: true });
+    tl.to("#title", { color: "var(--accent2, #fff)", duration: 0.5 }, 0);
+    window.__timelines = { c1: tl };
+  </script>
+</body></html>`;
+
+    const result = await lintHyperframeHtml(html);
+    expect(
+      result.findings.find((finding) => finding.code === "gsap_undefined_css_variable"),
+    ).toBeUndefined();
+  });
+
+  it("accepts a CSS variable declared through data-composition-variables", async () => {
+    const html = `
+<html data-composition-variables='[{"id":"accent2","type":"color","label":"Accent","default":"#ff3366"}]'>
+<body>
+  <div data-composition-id="c1" data-width="1920" data-height="1080"><h1 id="title">Text</h1></div>
+  <script>
+    const tl = gsap.timeline({ paused: true });
+    tl.to("#title", { color: "var(--accent2)", duration: 0.5 }, 0);
+    window.__timelines = { c1: tl };
+  </script>
+</body></html>`;
+
+    const result = await lintHyperframeHtml(html);
+    expect(
+      result.findings.find((finding) => finding.code === "gsap_undefined_css_variable"),
+    ).toBeUndefined();
+  });
+
   it("errors when window.__timelines is registered BEFORE the fonts.ready build", async () => {
     const html = `
 <html><body>

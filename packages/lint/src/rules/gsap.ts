@@ -43,6 +43,7 @@ import {
   WINDOW_TIMELINE_ASSIGN_PATTERN,
   TIMELINE_REGISTRY_OBJECT_LITERAL_PATTERN,
 } from "../utils";
+import { collectAllDeclaredVariableIds } from "./composition";
 
 // ── GSAP-specific types ────────────────────────────────────────────────────
 
@@ -190,6 +191,44 @@ function zeroValue(value: string | number | undefined): boolean {
   if (typeof value === "number") return value === 0;
   if (typeof value !== "string") return false;
   return Number(value.trim()) === 0;
+}
+
+function isGsapColorProperty(property: string): boolean {
+  const normalized = property.toLowerCase();
+  return (
+    !normalized.startsWith("--") &&
+    (normalized.endsWith("color") || normalized === "fill" || normalized === "stroke")
+  );
+}
+
+function collectStaticCssVariableDefinitions(
+  tags: readonly OpenTag[],
+  styles: LintContext["styles"],
+): Set<string> {
+  const definitions = new Set<string>();
+  const sources = [
+    ...styles.map((style) => style.content),
+    ...tags.map((tag) => readDecodedAttr(tag.raw, "style") ?? ""),
+  ];
+  const definitionPattern = /(?:^|[;{])\s*(--[A-Za-z0-9_-]+)\s*:/gm;
+  for (const source of sources) {
+    const withoutComments = source.replace(/\/\*[\s\S]*?\*\//g, " ");
+    for (const match of withoutComments.matchAll(definitionPattern)) {
+      if (match[1]) definitions.add(match[1]);
+    }
+  }
+  for (const id of collectAllDeclaredVariableIds(tags) ?? []) definitions.add(`--${id}`);
+  return definitions;
+}
+
+function cssVariableReferencesWithoutFallback(value: unknown): string[] {
+  const text = unwrapRaw(value);
+  if (typeof text !== "string") return [];
+  const variables: string[] = [];
+  for (const match of text.matchAll(/var\(\s*(--[A-Za-z0-9_-]+)\s*(,)?/g)) {
+    if (match[1] && !match[2]) variables.push(match[1]);
+  }
+  return variables;
 }
 
 function isHiddenGsapState(values: Record<string, string | number>): boolean {
@@ -1040,6 +1079,37 @@ function collectCssOpacityZeroSelectors(
 
 // fallow-ignore-next-line complexity
 export const gsapRules: LintRule<LintContext>[] = [
+  // gsap_undefined_css_variable
+  async ({ tags, styles, scripts }) => {
+    const definedVariables = collectStaticCssVariableDefinitions(tags, styles);
+    const findings: HyperframeLintFinding[] = [];
+    const reported = new Set<string>();
+    for (const script of scripts) {
+      for (const win of await cachedExtractGsapWindows(script.content)) {
+        for (const values of [win.fromPropertyValues, win.propertyValues]) {
+          for (const [property, value] of Object.entries(values ?? {})) {
+            if (!isGsapColorProperty(property)) continue;
+            for (const variable of cssVariableReferencesWithoutFallback(value)) {
+              if (definedVariables.has(variable)) continue;
+              const key = `${win.targetSelector}|${property}|${variable}`;
+              if (reported.has(key)) continue;
+              reported.add(key);
+              findings.push({
+                code: "gsap_undefined_css_variable",
+                severity: "warning",
+                message: `GSAP ${property} on "${win.targetSelector}" uses ${variable}, but no static CSS or composition-variable declaration defines it. The computed color may become invalid or transparent.`,
+                selector: win.targetSelector,
+                fixHint: `Define ${variable} in applicable CSS, declare "${variable.slice(2)}" in data-composition-variables, or add a var() fallback such as var(${variable}, #fff).`,
+                snippet: truncateSnippet(win.raw),
+              });
+            }
+          }
+        }
+      }
+    }
+    return findings;
+  },
+
   // overlapping_gsap_tweens + gsap_animates_clip_element
   // fallow-ignore-next-line complexity
   async ({ source, tags, scripts, styles, rootCompositionId }) => {
