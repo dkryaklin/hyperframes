@@ -1347,6 +1347,33 @@ describe("layout-audit.browser coordinate-frame findings", () => {
     expect(runAudit().filter((issue) => issue.code === "connector_orphan")).toEqual([]);
   });
 
+  it("orphans an unmarked flow-layer shaft whose endpoint node is hidden", () => {
+    document.body.innerHTML = `
+      <div id="root" data-composition-id="main" data-width="1920" data-height="1080">
+        <div id="n1"></div>
+        <div id="n2"></div>
+        <div id="caption">Pipeline overview</div>
+        <div id="footer">Confidential</div>
+        <svg id="flow-svg" class="flow-svg">
+          <path id="path-to-commitment" d="M 360 480 L 1400 480" />
+        </svg>
+      </div>
+    `;
+    installGeometry(
+      {
+        ...orphanRects,
+        "flow-svg": orphanRects.connectors,
+      },
+      orphanStyles({ n2: { backgroundColor: "rgb(30, 40, 50)", opacity: "0" } }),
+    );
+    installConnectorGeometry({ e: 0, f: 0 });
+    installAuditScript();
+
+    const issues = runAudit().filter((issue) => issue.code === "connector_orphan");
+    expect(issues).toHaveLength(1);
+    expect(issues[0]).toMatchObject({ selector: "#path-to-commitment" });
+  });
+
   it("does not orphan an unnamed decorative path on an empty frame", () => {
     document.body.innerHTML = `
       <div id="root" data-composition-id="main" data-width="1920" data-height="1080">
@@ -1364,6 +1391,54 @@ describe("layout-audit.browser coordinate-frame findings", () => {
     installAuditScript();
 
     expect(runAudit().filter((issue) => issue.code === "connector_orphan")).toEqual([]);
+  });
+
+  it("orphans a dark endpoint when the connector svg allows overflow", () => {
+    document.body.innerHTML = orphanDom.replace(
+      '<svg id="connectors">',
+      '<svg id="connectors" data-layout-allow-overflow>',
+    );
+    installGeometry(
+      orphanRects,
+      orphanStyles({ n2: { backgroundColor: "rgb(30, 40, 50)", opacity: "0" } }),
+    );
+    installConnectorGeometry({ e: 0, f: 0 });
+    installAuditScript();
+
+    const issues = runAudit().filter((issue) => issue.code === "connector_orphan");
+    expect(issues).toHaveLength(1);
+    expect(issues[0]).toMatchObject({ selector: "#path-input" });
+  });
+
+  it("detaches a paste-bug shaft when the connector svg allows overflow", () => {
+    document.body.innerHTML = `
+      <div id="root" data-composition-id="main" data-width="1920" data-height="1080">
+        <div id="n1"></div>
+        <div id="n2"></div>
+        <svg id="connector-svg" data-layout-allow-overflow>
+          <defs><marker id="arrow"><path id="tip" d="M 0 0 L 8 4 L 0 8" /></marker></defs>
+          <path id="detached" class="connector-line" d="M 980 580 L 380 280" />
+        </svg>
+      </div>
+    `;
+    installGeometry(
+      {
+        root: rect({ left: 0, top: 0, width: 1920, height: 1080 }),
+        n1: rect({ left: 900, top: 500, width: 160, height: 160 }),
+        n2: rect({ left: 300, top: 200, width: 160, height: 160 }),
+        "connector-svg": rect({ left: 80, top: 227, width: 1740, height: 830 }),
+      },
+      {
+        n1: { backgroundColor: "rgb(30, 40, 50)" },
+        n2: { backgroundColor: "rgb(30, 40, 50)" },
+      },
+    );
+    installConnectorGeometry({ e: 80, f: 227 });
+    installAuditScript();
+
+    const issues = runAudit().filter((issue) => issue.code === "connector_detached");
+    expect(issues).toHaveLength(1);
+    expect(issues[0]).toMatchObject({ selector: "#detached" });
   });
 });
 

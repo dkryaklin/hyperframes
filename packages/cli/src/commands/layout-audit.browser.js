@@ -1293,7 +1293,7 @@
     const threshold = Math.max(32, Math.min(rootRect.width, rootRect.height) * 0.02);
     const MIN_CONNECTOR_CHORD_PX = 8;
     for (const svg of Array.from(root.querySelectorAll("svg"))) {
-      if (!isVisibleElement(svg) || hasAllowOverflowFlag(svg)) continue;
+      if (!isVisibleElement(svg)) continue;
       for (const path of Array.from(svg.querySelectorAll("path"))) {
         if (path.closest(CONNECTOR_SKIP_CONTAINERS)) continue;
         if (!isConnectorPath(svg, path)) continue;
@@ -1368,20 +1368,6 @@
     return issues;
   }
 
-  function svgConnectorLayer(svg) {
-    const tokens = connectorNameFor(svg)
-      .toLowerCase()
-      .split(/[^a-z0-9]+/)
-      .filter(Boolean);
-    return tokens.some(
-      (token) =>
-        token === "connector" ||
-        token === "connectors" ||
-        token === "schematic" ||
-        token === "schematics",
-    );
-  }
-
   function shaftDashHidden(path) {
     if (typeof path.getTotalLength !== "function") return false;
     let total;
@@ -1419,11 +1405,10 @@
     let candidates = null;
     const threshold = Math.max(32, Math.min(rootRect.width, rootRect.height) * 0.02);
     for (const svg of Array.from(root.querySelectorAll("svg"))) {
-      if (!isVisibleElement(svg) || hasAllowOverflowFlag(svg)) continue;
+      if (!isVisibleElement(svg)) continue;
       for (const path of Array.from(svg.querySelectorAll("path"))) {
         if (path.closest(CONNECTOR_SKIP_CONTAINERS)) continue;
-        const marked = path.hasAttribute("marker-start") || path.hasAttribute("marker-end");
-        if (!marked && !svgConnectorLayer(svg)) continue;
+        if (!isConnectorPath(svg, path)) continue;
         if (!isVisibleElement(path) || shaftDashHidden(path)) continue;
         const user = pathUserEndpoints(path);
         const rendered = pathScreenEndpoints(svg, path, user);
