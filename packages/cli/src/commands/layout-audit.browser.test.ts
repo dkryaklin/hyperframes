@@ -1252,28 +1252,40 @@ describe("layout-audit.browser coordinate-frame findings", () => {
     expect(runAudit().filter((issue) => issue.code === "connector_detached")).toEqual([]);
   });
 
-  it("flags a marked shaft when node boxes are hidden", () => {
-    document.body.innerHTML = `
+  // The shaft spans n1 -> n2; both endpoints land on those boxes.
+  const orphanDom = `
       <div id="root" data-composition-id="main" data-width="1920" data-height="1080">
         <div id="n1"></div>
         <div id="n2"></div>
+        <div id="caption">Pipeline overview</div>
+        <div id="footer">Confidential</div>
         <svg id="connectors">
           <defs><marker id="arrowhead"><path id="tip" d="M 0 0 L 8 4 L 0 8" /></marker></defs>
-          <path id="path-input" d="M 40 540 L 720 540" marker-end="url(#arrowhead)" />
+          <path id="path-input" d="M 360 480 L 1400 480" marker-end="url(#arrowhead)" />
         </svg>
       </div>
     `;
+  const orphanRects = {
+    root: rect({ left: 0, top: 0, width: 1920, height: 1080 }),
+    n1: rect({ left: 200, top: 400, width: 160, height: 160 }),
+    n2: rect({ left: 1400, top: 400, width: 160, height: 160 }),
+    caption: rect({ left: 200, top: 100, width: 600, height: 80 }),
+    footer: rect({ left: 200, top: 900, width: 600, height: 60 }),
+    connectors: rect({ left: 0, top: 0, width: 1920, height: 1080 }),
+  };
+  const orphanStyles = (overrides: Record<string, Record<string, string>>) => ({
+    n1: { backgroundColor: "rgb(30, 40, 50)" },
+    n2: { backgroundColor: "rgb(30, 40, 50)" },
+    caption: { backgroundColor: "rgb(30, 40, 50)" },
+    footer: { backgroundColor: "rgb(30, 40, 50)" },
+    ...overrides,
+  });
+
+  it("flags a shaft whose own endpoint node is not on stage", () => {
+    document.body.innerHTML = orphanDom;
     installGeometry(
-      {
-        root: rect({ left: 0, top: 0, width: 1920, height: 1080 }),
-        n1: rect({ left: 900, top: 400, width: 160, height: 160 }),
-        n2: rect({ left: 1400, top: 400, width: 160, height: 160 }),
-        connectors: rect({ left: 0, top: 0, width: 1920, height: 1080 }),
-      },
-      {
-        n1: { backgroundColor: "rgb(30, 40, 50)", opacity: "0" },
-        n2: { backgroundColor: "rgb(30, 40, 50)", opacity: "0" },
-      },
+      orphanRects,
+      orphanStyles({ n2: { backgroundColor: "rgb(30, 40, 50)", opacity: "0" } }),
     );
     installConnectorGeometry({ e: 0, f: 0 });
     installAuditScript();
@@ -1281,30 +1293,57 @@ describe("layout-audit.browser coordinate-frame findings", () => {
     const issues = runAudit().filter((issue) => issue.code === "connector_orphan");
     expect(issues).toHaveLength(1);
     expect(issues[0]).toMatchObject({ selector: "#path-input" });
-    expect(issues[0]?.message).toContain("no node boxes");
+    expect(issues[0]?.message).toContain("#n2");
   });
 
-  it("does not orphan a shaft when two nodes are visible", () => {
-    document.body.innerHTML = `
-      <div id="root" data-composition-id="main" data-width="1920" data-height="1080">
-        <div id="n1"></div>
-        <div id="n2"></div>
-        <svg id="connectors">
-          <path id="path-input" d="M 40 540 L 720 540" marker-end="url(#arrowhead)" />
-        </svg>
-      </div>
-    `;
+  it("names both endpoints when neither is on stage", () => {
+    document.body.innerHTML = orphanDom;
     installGeometry(
-      {
-        root: rect({ left: 0, top: 0, width: 1920, height: 1080 }),
-        n1: rect({ left: 900, top: 400, width: 160, height: 160 }),
-        n2: rect({ left: 1400, top: 400, width: 160, height: 160 }),
-        connectors: rect({ left: 0, top: 0, width: 1920, height: 1080 }),
-      },
-      {
-        n1: { backgroundColor: "rgb(30, 40, 50)" },
-        n2: { backgroundColor: "rgb(30, 40, 50)" },
-      },
+      orphanRects,
+      orphanStyles({
+        n1: { backgroundColor: "rgb(30, 40, 50)", opacity: "0" },
+        n2: { backgroundColor: "rgb(30, 40, 50)", opacity: "0" },
+      }),
+    );
+    installConnectorGeometry({ e: 0, f: 0 });
+    installAuditScript();
+
+    const issues = runAudit().filter((issue) => issue.code === "connector_orphan");
+    expect(issues).toHaveLength(1);
+    expect(issues[0]?.message).toContain("both endpoints");
+  });
+
+  // The old rule counted anchors stage-wide, so any two on-stage elements silenced it.
+  // Chrome (caption + footer) must not stand in for the node the shaft actually meets.
+  it("still flags a dark endpoint while other elements are on stage", () => {
+    document.body.innerHTML = orphanDom;
+    installGeometry(
+      orphanRects,
+      orphanStyles({ n2: { backgroundColor: "rgb(30, 40, 50)", opacity: "0" } }),
+    );
+    installConnectorGeometry({ e: 0, f: 0 });
+    installAuditScript();
+
+    const issues = runAudit().filter((issue) => issue.code === "connector_orphan");
+    expect(issues).toHaveLength(1);
+    expect(issues[0]?.message).toContain("#n2");
+  });
+
+  it("does not orphan a shaft whose endpoints are both on stage", () => {
+    document.body.innerHTML = orphanDom;
+    installGeometry(orphanRects, orphanStyles({}));
+    installConnectorGeometry({ e: 0, f: 0 });
+    installAuditScript();
+
+    expect(runAudit().filter((issue) => issue.code === "connector_orphan")).toEqual([]);
+  });
+
+  // A free end is connector_detached's finding. This rule only judges endpoints that meet a node.
+  it("does not orphan a shaft whose ends meet no node at all", () => {
+    document.body.innerHTML = orphanDom;
+    installGeometry(
+      { ...orphanRects, n1: rect({ left: 900, top: 900, width: 160, height: 160 }) },
+      orphanStyles({}),
     );
     installConnectorGeometry({ e: 0, f: 0 });
     installAuditScript();

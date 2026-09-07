@@ -1397,10 +1397,30 @@
     return offset >= total * 0.9 && dash >= total * 0.9;
   }
 
-  // Shaft painted while fewer than two nodes are visible — enter-early or exit-late.
+  // Anchor candidates by layout alone. A node hidden with opacity:0 keeps its box, so an
+  // endpoint still resolves to it and its visibility becomes the thing under test.
+  function connectorEndpointCandidates(root, rootRect) {
+    const candidates = [];
+    const rootArea = rectArea(rootRect);
+    for (const element of Array.from(root.querySelectorAll("*"))) {
+      if (element.closest("svg") || IGNORE_TAGS.has(element.tagName) || hasIgnoreFlag(element))
+        continue;
+      const style = getComputedStyle(element);
+      const opaque = RASTER_TAGS.has(element.tagName) || hasOpaqueBackground(style);
+      if (!opaque && !textContentFor(element)) continue;
+      const rect = toRect(element.getBoundingClientRect());
+      const area = rectArea(rect);
+      if (area < 400 || area > rootArea * 0.15) continue;
+      candidates.push({ rect, element });
+    }
+    return candidates;
+  }
+
+  // Shaft painted while one of its own endpoints is not on — enter-early or exit-late.
   function connectorOrphanIssues(root, rootRect, time) {
     const issues = [];
-    let anchors = null;
+    let candidates = null;
+    const threshold = Math.max(32, Math.min(rootRect.width, rootRect.height) * 0.02);
     for (const svg of Array.from(root.querySelectorAll("svg"))) {
       if (!isVisibleElement(svg) || hasAllowOverflowFlag(svg)) continue;
       for (const path of Array.from(svg.querySelectorAll("path"))) {
@@ -1416,18 +1436,27 @@
           rendered.end.y - rendered.start.y,
         );
         if (renderedChord < 80) continue;
-        if (anchors === null) anchors = connectorAnchorRects(root, rootRect);
-        if (anchors.compact.length >= 2) continue;
+        if (candidates === null) candidates = connectorEndpointCandidates(root, rootRect);
+        // Only an endpoint that actually lands on a node is evidence; a free end is
+        // connector_detached's business, not this rule's.
+        const dark = [];
+        for (const point of [rendered.start, rendered.end]) {
+          let best = null;
+          for (const candidate of candidates) {
+            const gap = distanceToRect(point, candidate.rect);
+            if (gap > threshold) continue;
+            if (best === null || gap < best.gap) best = { gap, candidate };
+          }
+          if (best !== null && !isVisibleElement(best.candidate.element)) dark.push(best.candidate);
+        }
+        if (dark.length === 0) continue;
         issues.push({
           code: "connector_orphan",
           severity: "warning",
           time,
           selector: selectorFor(path),
           containerSelector: selectorFor(svg),
-          message:
-            anchors.compact.length === 0
-              ? "Connector shaft is visible while no node boxes are on stage."
-              : "Connector shaft is visible while only one node box is on stage.",
+          message: `Connector shaft is visible while ${dark.length === 2 ? "both endpoints are" : `its endpoint ${selectorFor(dark[0].element)} is`} not on stage.`,
           rect: toRect({
             left: Math.min(rendered.start.x, rendered.end.x),
             top: Math.min(rendered.start.y, rendered.end.y),
