@@ -231,6 +231,26 @@ export const coreRules: Array<(ctx: LintContext) => HyperframeLintFinding[]> = [
     return findings;
   },
 
+  // unbalanced_style_tags — extra </style> dumps the rest of the stylesheet as on-screen text.
+  ({ source }) => {
+    const withoutScripts = source.replace(/<script\b[\s\S]*?<\/script>/gi, "");
+    const opens = withoutScripts.match(/<style\b/gi)?.length ?? 0;
+    const closes = withoutScripts.match(/<\/style>/gi)?.length ?? 0;
+    if (opens === closes) return [];
+    return [
+      {
+        code: "unbalanced_style_tags",
+        severity: "error",
+        message:
+          opens > closes
+            ? "A <style> block is never closed, so following markup is parsed as CSS and disappears from the frame."
+            : "An extra </style> closes the stylesheet early, so trailing CSS renders as visible on-screen text.",
+        fixHint: "Keep <style> and </style> paired. One extra closer dumps CSS into the body.",
+        snippet: truncateSnippet(withoutScripts.match(/<\/?style\b[^>]*>/i)?.[0] || "<style>"),
+      },
+    ];
+  },
+
   // visible_markup_comment
   ({ source }) => {
     const snippet = findVisibleMarkupCommentLeak(source);

@@ -1251,6 +1251,85 @@ describe("layout-audit.browser coordinate-frame findings", () => {
 
     expect(runAudit().filter((issue) => issue.code === "connector_detached")).toEqual([]);
   });
+
+  it("flags a marked shaft when node boxes are hidden", () => {
+    document.body.innerHTML = `
+      <div id="root" data-composition-id="main" data-width="1920" data-height="1080">
+        <div id="n1"></div>
+        <div id="n2"></div>
+        <svg id="connectors">
+          <defs><marker id="arrowhead"><path id="tip" d="M 0 0 L 8 4 L 0 8" /></marker></defs>
+          <path id="path-input" d="M 40 540 L 720 540" marker-end="url(#arrowhead)" />
+        </svg>
+      </div>
+    `;
+    installGeometry(
+      {
+        root: rect({ left: 0, top: 0, width: 1920, height: 1080 }),
+        n1: rect({ left: 900, top: 400, width: 160, height: 160 }),
+        n2: rect({ left: 1400, top: 400, width: 160, height: 160 }),
+        connectors: rect({ left: 0, top: 0, width: 1920, height: 1080 }),
+      },
+      {
+        n1: { backgroundColor: "rgb(30, 40, 50)", opacity: "0" },
+        n2: { backgroundColor: "rgb(30, 40, 50)", opacity: "0" },
+      },
+    );
+    installConnectorGeometry({ e: 0, f: 0 });
+    installAuditScript();
+
+    const issues = runAudit().filter((issue) => issue.code === "connector_orphan");
+    expect(issues).toHaveLength(1);
+    expect(issues[0]).toMatchObject({ selector: "#path-input" });
+    expect(issues[0]?.message).toContain("no node boxes");
+  });
+
+  it("does not orphan a shaft when two nodes are visible", () => {
+    document.body.innerHTML = `
+      <div id="root" data-composition-id="main" data-width="1920" data-height="1080">
+        <div id="n1"></div>
+        <div id="n2"></div>
+        <svg id="connectors">
+          <path id="path-input" d="M 40 540 L 720 540" marker-end="url(#arrowhead)" />
+        </svg>
+      </div>
+    `;
+    installGeometry(
+      {
+        root: rect({ left: 0, top: 0, width: 1920, height: 1080 }),
+        n1: rect({ left: 900, top: 400, width: 160, height: 160 }),
+        n2: rect({ left: 1400, top: 400, width: 160, height: 160 }),
+        connectors: rect({ left: 0, top: 0, width: 1920, height: 1080 }),
+      },
+      {
+        n1: { backgroundColor: "rgb(30, 40, 50)" },
+        n2: { backgroundColor: "rgb(30, 40, 50)" },
+      },
+    );
+    installConnectorGeometry({ e: 0, f: 0 });
+    installAuditScript();
+
+    expect(runAudit().filter((issue) => issue.code === "connector_orphan")).toEqual([]);
+  });
+
+  it("does not orphan an unnamed decorative path on an empty frame", () => {
+    document.body.innerHTML = `
+      <div id="root" data-composition-id="main" data-width="1920" data-height="1080">
+        <svg id="decor"><path id="drafting-line" d="M 40 540 L 720 540" /></svg>
+      </div>
+    `;
+    installGeometry(
+      {
+        root: rect({ left: 0, top: 0, width: 1920, height: 1080 }),
+        decor: rect({ left: 0, top: 0, width: 1920, height: 1080 }),
+      },
+      {},
+    );
+    installConnectorGeometry({ e: 0, f: 0 });
+    installAuditScript();
+
+    expect(runAudit().filter((issue) => issue.code === "connector_orphan")).toEqual([]);
+  });
 });
 
 describe("layout-audit.browser content overlap", () => {

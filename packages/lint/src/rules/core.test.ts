@@ -294,6 +294,31 @@ describe("core rules", () => {
     expect(finding).toBeUndefined();
   });
 
+  it("reports error when an extra style closer dumps CSS as text", async () => {
+    const html = compositionWithBodyPrefix(
+      "",
+      `
+    <style>
+      .editorial-block { color: #fff; }
+    </style>
+    </style>
+    .leftover { color: red; }
+    <div class="editorial-block">Hello</div>
+`,
+    );
+    const result = await lintHyperframeHtml(html);
+    const finding = result.findings.find((f) => f.code === "unbalanced_style_tags");
+    expect(finding).toBeDefined();
+    expect(finding?.severity).toBe("error");
+    expect(finding?.message).toContain("extra </style>");
+  });
+
+  it("does not report paired style blocks", async () => {
+    const html = compositionWithBodyPrefix("", `<div class="editorial-block">Hello</div>`);
+    const result = await lintHyperframeHtml(html);
+    expect(result.findings.find((f) => f.code === "unbalanced_style_tags")).toBeUndefined();
+  });
+
   it("reports error when CSS block comment syntax leaks into visible markup", async () => {
     const html = compositionWithBodyPrefix(
       "",

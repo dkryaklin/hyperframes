@@ -1368,6 +1368,82 @@
     return issues;
   }
 
+  function svgConnectorLayer(svg) {
+    const tokens = connectorNameFor(svg)
+      .toLowerCase()
+      .split(/[^a-z0-9]+/)
+      .filter(Boolean);
+    return tokens.some(
+      (token) =>
+        token === "connector" ||
+        token === "connectors" ||
+        token === "schematic" ||
+        token === "schematics",
+    );
+  }
+
+  function shaftDashHidden(path) {
+    if (typeof path.getTotalLength !== "function") return false;
+    let total;
+    try {
+      total = path.getTotalLength();
+    } catch {
+      return false;
+    }
+    if (!Number.isFinite(total) || total <= 0) return false;
+    const style = getComputedStyle(path);
+    const offset = Number.parseFloat(style.strokeDashoffset || "0");
+    const dash = Number.parseFloat(String(style.strokeDasharray || "").split(/[\s,]+/)[0] || "0");
+    return offset >= total * 0.9 && dash >= total * 0.9;
+  }
+
+  // Shaft painted while fewer than two nodes are visible — enter-early or exit-late.
+  function connectorOrphanIssues(root, rootRect, time) {
+    const issues = [];
+    let anchors = null;
+    for (const svg of Array.from(root.querySelectorAll("svg"))) {
+      if (!isVisibleElement(svg) || hasAllowOverflowFlag(svg)) continue;
+      for (const path of Array.from(svg.querySelectorAll("path"))) {
+        if (path.closest(CONNECTOR_SKIP_CONTAINERS)) continue;
+        const marked = path.hasAttribute("marker-start") || path.hasAttribute("marker-end");
+        if (!marked && !svgConnectorLayer(svg)) continue;
+        if (!isVisibleElement(path) || shaftDashHidden(path)) continue;
+        const user = pathUserEndpoints(path);
+        const rendered = pathScreenEndpoints(svg, path, user);
+        if (!user || !rendered) continue;
+        const renderedChord = Math.hypot(
+          rendered.end.x - rendered.start.x,
+          rendered.end.y - rendered.start.y,
+        );
+        if (renderedChord < 80) continue;
+        if (anchors === null) anchors = connectorAnchorRects(root, rootRect);
+        if (anchors.compact.length >= 2) continue;
+        issues.push({
+          code: "connector_orphan",
+          severity: "warning",
+          time,
+          selector: selectorFor(path),
+          containerSelector: selectorFor(svg),
+          message:
+            anchors.compact.length === 0
+              ? "Connector shaft is visible while no node boxes are on stage."
+              : "Connector shaft is visible while only one node box is on stage.",
+          rect: toRect({
+            left: Math.min(rendered.start.x, rendered.end.x),
+            top: Math.min(rendered.start.y, rendered.end.y),
+            right: Math.max(rendered.start.x, rendered.end.x),
+            bottom: Math.max(rendered.start.y, rendered.end.y),
+            width: Math.abs(rendered.end.x - rendered.start.x),
+            height: Math.abs(rendered.end.y - rendered.start.y),
+          }),
+          fixHint:
+            "Show the shaft only after both ends are on, and hide it with the earlier exit. Do not give the line its own clock.",
+        });
+      }
+    }
+    return issues;
+  }
+
   function candidateAnchor(element) {
     const dataAttributes = {};
     for (const attribute of Array.from(element.attributes)) {
@@ -1472,6 +1548,7 @@
     issues.push(...escaped.issues);
     issues.push(...panelOutOfCanvasIssues(root, rootRect, time, tolerance, escaped.flagged));
     issues.push(...connectorDetachmentIssues(root, rootRect, time));
+    issues.push(...connectorOrphanIssues(root, rootRect, time));
     return issues;
   };
 

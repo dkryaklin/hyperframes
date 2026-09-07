@@ -309,6 +309,7 @@ describe("persistence-tiered severity (#U10)", () => {
       "escaped_container",
       "panel_out_of_canvas",
       "connector_detached",
+      "connector_orphan",
     ] as const) {
       const collapsed = collapseStaticLayoutIssues([{ ...issue(code, "warning"), time: 3 }], 9);
       expect(collapsed[0]).toMatchObject({ severity: "info", occurrences: 1 });

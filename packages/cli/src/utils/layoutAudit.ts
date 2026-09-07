@@ -23,6 +23,7 @@ export type LayoutIssueCode =
   | "escaped_container"
   | "panel_out_of_canvas"
   | "connector_detached"
+  | "connector_orphan"
   // Cross-sample rotation finding — a spinning element whose bbox center drifts
   // because it pivots about the wrong point (bad transformOrigin/svgOrigin).
   | "rotation_pivot_drift"
@@ -202,6 +203,7 @@ const PERSISTENCE_TIERED_CODES: ReadonlySet<LayoutIssueCode> = new Set([
   "escaped_container",
   "panel_out_of_canvas",
   "connector_detached",
+  "connector_orphan",
 ]);
 
 export function collapseStaticLayoutIssues(
