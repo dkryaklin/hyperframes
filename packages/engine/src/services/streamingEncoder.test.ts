@@ -563,6 +563,7 @@ describe("spawnStreamingEncoder lifecycle and cleanup", () => {
     const result = await encoder.close();
     expect(result.success).toBe(false);
     expect(result.failureReason).toBe("external_interruption");
+    expect(result.error).toContain("termination=exit");
     expect(encoder.getExitFailureReason?.()).toBe("external_interruption");
   });
 
@@ -661,7 +662,11 @@ describe("spawnStreamingEncoder lifecycle and cleanup", () => {
     const result = await encoder.close();
 
     expect(result.success).toBe(false);
-    expect(result.error).toBe("Streaming encode cancelled");
+    expect(result.error).toContain("Streaming encode cancelled");
+    expect(result.error).toContain("termination=abort");
+    expect(result.error).toContain("frames attempted=0, accepted=0");
+    expect(encoder.getExitError()).toBe(result.error);
+    expect(result.failureReason).toBeUndefined();
   });
 
   it("close() is idempotent: a second call still resolves to a result and does not throw", async () => {
@@ -921,6 +926,56 @@ describe("spawnStreamingEncoder lifecycle and cleanup", () => {
     }
   });
 
+  it("keeps progressing under backpressure beyond the total timeout budget", async () => {
+    vi.useFakeTimers();
+    try {
+      const { spawn, calls } = createSpawnSpy();
+      vi.resetModules();
+      vi.doMock("child_process", () => ({ spawn }));
+      const { spawnStreamingEncoder } = await import("./streamingEncoder.js");
+      const dir = mkdtempSync(join(tmpdir(), "se-slow-drain-"));
+      const encoder = await spawnStreamingEncoder(join(dir, "out.mp4"), baseOptions, undefined, {
+        ffmpegStreamingTimeout: 1000,
+      });
+      const proc = calls[0]!.proc;
+      proc.stdin.write = () => false;
+      for (let i = 0; i < 5; i++) {
+        const write = encoder.writeFrame(Buffer.from([i]));
+        vi.advanceTimersByTime(900);
+        proc.stdin.emit("drain");
+        await expect(write).resolves.toBe(true);
+      }
+      expect(proc.kill).not.toHaveBeenCalled();
+      proc.emit("close", 0);
+      expect((await encoder.close()).success).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("reports watchdog termination as failure even when the child exits zero", async () => {
+    vi.useFakeTimers();
+    try {
+      const { spawn, calls } = createSpawnSpy();
+      vi.resetModules();
+      vi.doMock("child_process", () => ({ spawn }));
+      const { spawnStreamingEncoder } = await import("./streamingEncoder.js");
+      const dir = mkdtempSync(join(tmpdir(), "se-timeout-zero-"));
+      const encoder = await spawnStreamingEncoder(join(dir, "out.mp4"), baseOptions, undefined, {
+        ffmpegStreamingTimeout: 1000,
+      });
+      vi.advanceTimersByTime(1000);
+      calls[0]!.proc.emit("close", 0);
+      const result = await encoder.close();
+      expect(result.success).toBe(false);
+      expect(result.error).toContain("termination=inactivity");
+      expect(result.error).toContain("frames attempted=0, accepted=0");
+      expect(encoder.getExitError()).toBe(result.error);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("inactivity timeout still fires when stdin is backpressured (stalled ffmpeg, live producer)", async () => {
     vi.useFakeTimers();
     try {
@@ -951,8 +1006,22 @@ describe("spawnStreamingEncoder lifecycle and cleanup", () => {
       vi.advanceTimersByTime(1100);
       expect(proc.kill).toHaveBeenCalledWith("SIGTERM");
 
-      proc.emit("close", null);
+      // FFmpeg commonly handles SIGTERM and exits 255 with this stderr.
+      proc.stderr.emit("data", Buffer.from("Exiting normally, received signal 15.\n"));
+      proc.emit("close", 255);
       await expect(writePromise).resolves.toBe(false);
+      expect(encoder.getExitStatus()).toBe("error");
+      const errorAtExit = encoder.getExitError();
+      expect(errorAtExit).toContain("termination=inactivity");
+      expect(errorAtExit).toContain("ffmpegStreamingTimeout=1000 ms");
+      expect(errorAtExit).toContain("frames attempted=1, accepted=1, waitingForDrain=true");
+      expect(encoder.getExitFailureReason?.()).toBeUndefined();
+      // A late capture callback must not overwrite the counts at termination.
+      await expect(encoder.writeFrame(Buffer.from([1]))).resolves.toBe(false);
+      expect(encoder.getExitError()).toBe(errorAtExit);
+      const result = await encoder.close();
+      expect(result.error).toBe(errorAtExit);
+      expect(result.failureReason).toBeUndefined();
     } finally {
       vi.useRealTimers();
     }

@@ -23,6 +23,7 @@ export interface ManagedChildProcessOptions {
   terminationGraceMs?: number;
   stderrMaxBytes?: number;
   onStderr?: (chunk: string) => void;
+  onTerminationRequested?: () => void;
   now?: () => number;
 }
 
@@ -143,6 +144,7 @@ export class ManagedChildProcess {
   ): void {
     if (this.settled || this.requestedReason) return;
     this.requestedReason = reason;
+    this.options.onTerminationRequested?.();
     try {
       this.child.kill("SIGTERM");
     } catch {

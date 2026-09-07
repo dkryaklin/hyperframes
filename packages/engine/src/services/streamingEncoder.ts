@@ -472,6 +472,15 @@ export async function spawnStreamingEncoder(
   let exitSignal: NodeJS.Signals | null = null;
   let terminationReason: ManagedProcessTerminationReason = "exit";
 
+  let framesAttempted = 0;
+  let framesAccepted = 0;
+  let waitingForDrain = false;
+  let terminationFrames: string | undefined;
+  // Accepted means queued by Node's writable, including writes returning false;
+  // it does not mean FFmpeg has encoded the frame.
+  const frameDiagnostics = () =>
+    `frames attempted=${framesAttempted}, accepted=${framesAccepted}, waitingForDrain=${waitingForDrain}`;
+
   ffmpeg.stdin?.on("error", () => {});
   ffmpeg.stdout?.on("error", () => {});
 
@@ -488,12 +497,16 @@ export async function spawnStreamingEncoder(
   const managed = new ManagedChildProcess(ffmpeg, {
     signal,
     inactivityTimeoutMs: streamingTimeout,
+    onTerminationRequested: () => {
+      terminationFrames = frameDiagnostics();
+    },
   });
   const exitPromise = managed.wait().then((outcome) => {
     exitCode = outcome.exitCode;
     exitSignal = outcome.signal;
     stderr = outcome.stderr;
     terminationReason = outcome.reason;
+    terminationFrames ??= frameDiagnostics();
     exitStatus = outcome.reason === "exit" && outcome.exitCode === 0 ? "success" : "error";
     return outcome;
   });
@@ -533,9 +546,23 @@ export async function spawnStreamingEncoder(
     }
   };
 
+  const formatExitError = (): string => {
+    const message =
+      terminationReason === "abort"
+        ? "Streaming encode cancelled"
+        : formatFfmpegError(exitCode, stderr);
+    const timeout =
+      terminationReason === "inactivity"
+        ? `; ffmpegStreamingTimeout=${streamingTimeout} ms without write progress`
+        : "";
+    return `${message}\nStreaming encoder termination=${terminationReason}${timeout}; ${terminationFrames ?? frameDiagnostics()}`;
+  };
+
   const encoder: StreamingEncoder = {
     writeFrame: async (buffer: Buffer): Promise<boolean> => {
+      framesAttempted++;
       const stdin = ffmpeg.stdin;
+      if (terminationFrames !== undefined) await exitPromise;
       if (exitStatus !== "running") {
         return false;
       }
@@ -554,22 +581,21 @@ export async function spawnStreamingEncoder(
       // and flicker.
       const copy = Buffer.from(buffer);
       const accepted = stdin.write(copy);
-      // Reset inactivity timer immediately ONLY on `accepted === true`. `true`
-      // means the write went through to the kernel pipe without buffering in
-      // Node — proof FFmpeg is actually consuming. `false` means Node's writable
-      // stream had to buffer (FFmpeg hasn't drained the pipe yet); we await
-      // `drain` before letting callers produce the next frame, and only reset
-      // after drain proves consumption. We deliberately don't reset before
-      // drain so a hung FFmpeg with a still-producing Chrome can't keep us
-      // alive forever while Node's stdin buffer grows to OOM. If FFmpeg exits
-      // before draining, waitForDrainOrExit returns "exit", removes its
-      // one-shot listeners, and callers see `false` instead of hanging.
+      framesAccepted++;
+      // A false return is backpressure, not rejection. Wait for drain before
+      // producing another frame, and keep the watchdog armed during that wait.
       if (accepted) {
         managed.markActivity();
         return true;
       }
 
-      const drainResult = await waitForDrainOrExit(stdin);
+      waitingForDrain = true;
+      let drainResult: "drain" | "exit";
+      try {
+        drainResult = await waitForDrainOrExit(stdin);
+      } finally {
+        waitingForDrain = false;
+      }
       if (drainResult !== "drain" || exitStatus !== "running") {
         return false;
       }
@@ -599,25 +625,12 @@ export async function spawnStreamingEncoder(
       const outcome = await exitPromise;
       const durationMs = outcome.durationMs;
 
-      if (terminationReason === "abort") {
+      if (exitStatus === "error") {
         return {
           success: false,
           durationMs,
           fileSize: 0,
-          error: "Streaming encode cancelled",
-        };
-      }
-
-      if (exitCode !== 0) {
-        const inactivitySuffix =
-          terminationReason === "inactivity"
-            ? `\nFFmpeg stopped after ${streamingTimeout} ms without consuming a frame.`
-            : "";
-        return {
-          success: false,
-          durationMs,
-          fileSize: 0,
-          error: `${formatFfmpegError(exitCode, stderr)}${inactivitySuffix}`,
+          error: formatExitError(),
           failureReason: isExternalFfmpegInterruption({
             exitCode,
             signal: exitSignal,
@@ -638,7 +651,7 @@ export async function spawnStreamingEncoder(
 
     getExitError: () => {
       if (exitStatus !== "error") return undefined;
-      return formatFfmpegError(exitCode, stderr);
+      return formatExitError();
     },
 
     getExitFailureReason: () => {
