@@ -1397,8 +1397,6 @@
     return offset >= total * 0.9 && dash >= total * 0.9;
   }
 
-  // Anchor candidates by layout alone. A node hidden with opacity:0 keeps its box, so an
-  // endpoint still resolves to it and its visibility becomes the thing under test.
   function connectorEndpointCandidates(root, rootRect) {
     const candidates = [];
     const rootArea = rectArea(rootRect);
@@ -1416,7 +1414,6 @@
     return candidates;
   }
 
-  // Shaft painted while one of its own endpoints is not on — enter-early or exit-late.
   function connectorOrphanIssues(root, rootRect, time) {
     const issues = [];
     let candidates = null;
@@ -1437,8 +1434,6 @@
         );
         if (renderedChord < 80) continue;
         if (candidates === null) candidates = connectorEndpointCandidates(root, rootRect);
-        // Only an endpoint that actually lands on a node is evidence; a free end is
-        // connector_detached's business, not this rule's.
         const dark = [];
         for (const point of [rendered.start, rendered.end]) {
           let best = null;

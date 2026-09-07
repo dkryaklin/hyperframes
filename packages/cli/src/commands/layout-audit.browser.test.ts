@@ -1252,7 +1252,6 @@ describe("layout-audit.browser coordinate-frame findings", () => {
     expect(runAudit().filter((issue) => issue.code === "connector_detached")).toEqual([]);
   });
 
-  // The shaft spans n1 -> n2; both endpoints land on those boxes.
   const orphanDom = `
       <div id="root" data-composition-id="main" data-width="1920" data-height="1080">
         <div id="n1"></div>
@@ -1313,8 +1312,6 @@ describe("layout-audit.browser coordinate-frame findings", () => {
     expect(issues[0]?.message).toContain("both endpoints");
   });
 
-  // The old rule counted anchors stage-wide, so any two on-stage elements silenced it.
-  // Chrome (caption + footer) must not stand in for the node the shaft actually meets.
   it("still flags a dark endpoint while other elements are on stage", () => {
     document.body.innerHTML = orphanDom;
     installGeometry(
@@ -1338,7 +1335,6 @@ describe("layout-audit.browser coordinate-frame findings", () => {
     expect(runAudit().filter((issue) => issue.code === "connector_orphan")).toEqual([]);
   });
 
-  // A free end is connector_detached's finding. This rule only judges endpoints that meet a node.
   it("does not orphan a shaft whose ends meet no node at all", () => {
     document.body.innerHTML = orphanDom;
     installGeometry(
