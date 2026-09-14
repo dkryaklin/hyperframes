@@ -1,3 +1,4 @@
+import { buildProjectApiPath } from "../utils/projectRouting";
 import { useCallback } from "react";
 import { usePlayerStore } from "../player";
 import {
@@ -74,7 +75,6 @@ export function useElementLifecycleOps({
   activeCompPath,
   showToast,
   writeProjectFile,
-  domEditSaveTimestampRef,
   editHistory,
   projectIdRef,
   reloadPreview,
@@ -146,13 +146,15 @@ export function useElementLifecycleOps({
           }
         }
 
-        domEditSaveTimestampRef.current = Date.now();
         // One request for the whole selection. Removing members one at a time
         // cost a round trip and a rewrite of the file EACH, and a canvas
         // selection runs to hundreds of members — the file ended up correct, but
         // only after long enough that Delete looked like it had done nothing.
         const removeResponse = await fetch(
-          `/api/projects/${pid}/file-mutations/remove-elements/${encodeURIComponent(targetPath)}`,
+          buildProjectApiPath(
+            pid,
+            `/file-mutations/remove-elements/${encodeURIComponent(targetPath)}`,
+          ),
           {
             method: "POST",
             headers: { "Content-Type": "application/json", ...studioWriteHeaders() },
@@ -216,7 +218,6 @@ export function useElementLifecycleOps({
     [
       activeCompPath,
       clearDomSelection,
-      domEditSaveTimestampRef,
       editHistory.recordEdit,
       onTrySdkDelete,
       onElementDeleted,

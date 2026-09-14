@@ -218,10 +218,26 @@ let scrubPrevVolume: number | null = null;
 // Resolve the SAME element the store identified as music: prefer its id, then
 // the role attribute, and only fall back to the first <audio> (which could be a
 // voiceover, so the id hint matters).
+/**
+ * `doc` is the preview iframe's document, so its `<audio>` nodes are instances of
+ * the IFRAME's `HTMLAudioElement`, never this module's. `instanceof
+ * HTMLAudioElement` here is false for every one of them, which silently threw the
+ * `musicId` hint away and fell through to "first `<audio>` in the document" — the
+ * very thing the comment above warns can be a voiceover. Ask what the node IS.
+ * Same rule and same reasoning as packages/core/src/runtime/domRealm.ts.
+ */
+function isAudioNode(node: Element | null): node is HTMLAudioElement {
+  return (
+    node !== null &&
+    node.namespaceURI === "http://www.w3.org/1999/xhtml" &&
+    node.localName === "audio"
+  );
+}
+
 function resolveScrubAudioEl(doc: Document, musicId?: string | null): HTMLAudioElement | null {
   if (musicId) {
     const byId = doc.getElementById(musicId);
-    if (byId instanceof HTMLAudioElement) return byId;
+    if (isAudioNode(byId)) return byId;
   }
   return (
     doc.querySelector<HTMLAudioElement>("audio[data-timeline-role='music']") ??
@@ -229,11 +245,24 @@ function resolveScrubAudioEl(doc: Document, musicId?: string | null): HTMLAudioE
   );
 }
 
+/** The runtime stops any media running under a paused clock, and a scrub audition
+ *  IS media running under a paused clock, so it has to borrow the element. Every
+ *  hop is optional: a runtime predating the hook must no-op, not throw. Wrapped in
+ *  named calls so `applyScrub` does not carry the optional chains' branches. */
+function leaseScrubElement(el: HTMLAudioElement): void {
+  (el.ownerDocument.defaultView as IframeWindow | null)?.__hf?.leasePausedMedia?.(el);
+}
+
+function releaseScrubElement(el: HTMLAudioElement): void {
+  (el.ownerDocument.defaultView as IframeWindow | null)?.__hf?.releasePausedMedia?.(el);
+}
+
 function applyScrub(el: HTMLAudioElement, audioFileTime: number, previewVolume: number): void {
   if (scrubAudioEl && scrubAudioEl !== el) stopScrubPreviewAudio();
   if (scrubPrevMuted === null) scrubPrevMuted = el.muted;
   if (scrubPrevVolume === null) scrubPrevVolume = el.volume;
   scrubAudioEl = el;
+  leaseScrubElement(el);
   try {
     el.muted = false;
     el.volume = SCRUB_VOLUME * normalizePreviewVolume(previewVolume);
@@ -280,6 +309,9 @@ export function stopScrubPreviewAudio(): void {
   const el = scrubAudioEl;
   scrubAudioEl = null;
   if (!el) return;
+  // `scrubStopTimer` guarantees this runs within ~140 ms of the last scrub, so
+  // the borrow cannot outlive the audition.
+  releaseScrubElement(el);
   try {
     el.pause();
     if (scrubPrevMuted !== null) el.muted = scrubPrevMuted;

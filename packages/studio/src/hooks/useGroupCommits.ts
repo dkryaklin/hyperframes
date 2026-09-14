@@ -1,3 +1,4 @@
+import { buildProjectApiPath } from "../utils/projectRouting";
 import { useCallback } from "react";
 import {
   readProjectFileContent,
@@ -63,7 +64,6 @@ async function commitStructuralMutation(
     UseGroupCommitsParams,
     | "writeProjectFile"
     | "editHistory"
-    | "domEditSaveTimestampRef"
     | "clearDomSelection"
     | "forceReloadSdkSession"
     | "reloadPreview"
@@ -71,9 +71,8 @@ async function commitStructuralMutation(
 ): Promise<{ content?: string; groupId?: string }> {
   const originalContent = await readProjectFileContent(pid, targetPath);
 
-  deps.domEditSaveTimestampRef.current = Date.now();
   const mutateResponse = await fetch(
-    `/api/projects/${pid}/file-mutations/${route}/${encodeURIComponent(targetPath)}`,
+    buildProjectApiPath(pid, `/file-mutations/${route}/${encodeURIComponent(targetPath)}`),
     {
       method: "POST",
       headers: { "Content-Type": "application/json", ...studioWriteHeaders() },

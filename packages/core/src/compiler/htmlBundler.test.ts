@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { parseHTML } from "linkedom";
 import { afterEach, beforeEach, describe, it, expect, vi } from "vitest";
 import { bundleToSingleHtml, emitRootCompositionVariableStyles } from "./htmlBundler";
+import { ensureExternalScriptTag } from "./externalScripts";
 import { resetUnknownEnumWarnings } from "../runtime/getVariables";
 import { sanitizeCssValue } from "../runtime/applyVariableBindings";
 import { getHyperframeRuntimeScript } from "../generated/runtime-inline";
@@ -17,6 +18,16 @@ function makeTempProject(files: Record<string, string>): string {
     writeFileSync(full, content, "utf-8");
   }
   return dir;
+}
+
+/**
+ * The data URL a correctly-resolved asset must inline to. Asserting on the
+ * asset's CONTENT, not on the rewritten path string, is what proves rebasing
+ * resolved to the right file: resolving from the wrong base directory finds no
+ * file at all, so nothing is inlined and the assertion fails.
+ */
+function inlinedAs(mime: string, content: string): string {
+  return `data:${mime};base64,${Buffer.from(content, "utf-8").toString("base64")}`;
 }
 
 function makeColorGradingProject(lutSrc: string, files: Record<string, string> = {}): string {
@@ -1210,7 +1221,7 @@ describe("bundleToSingleHtml", () => {
 
     const bundled = await bundleToSingleHtml(dir);
 
-    expect(bundled).toContain("url('styles/assets/fonts/brand.woff2')");
+    expect(bundled).toContain(`url('${inlinedAs("font/woff2", "fake-font-data")}')`);
     expect(bundled).not.toContain("url('assets/fonts/brand.woff2')");
     expect(bundled).not.toContain("@import");
   });
@@ -1229,7 +1240,7 @@ describe("bundleToSingleHtml", () => {
 
     const bundled = await bundleToSingleHtml(dir);
 
-    expect(bundled).toContain("url('theme/images/grain.png')");
+    expect(bundled).toContain(`url('${inlinedAs("image/png", "fake-image-data")}')`);
     expect(bundled).not.toContain("url('./images/grain.png')");
   });
 
@@ -1248,7 +1259,7 @@ describe("bundleToSingleHtml", () => {
 
     const bundled = await bundleToSingleHtml(dir);
 
-    expect(bundled).toContain("url('assets/bg.png')");
+    expect(bundled).toContain(`url('${inlinedAs("image/png", "fake-image")}')`);
     expect(bundled).not.toContain("url('../../assets/bg.png')");
   });
 
@@ -1272,7 +1283,7 @@ describe("bundleToSingleHtml", () => {
 
     expect(bundled).toContain("url('https://cdn.example.com/font.woff2')");
     expect(bundled).toContain("url('data:image/svg+xml,<svg/>')");
-    expect(bundled).toContain("url('styles/img/bg.png')");
+    expect(bundled).toContain(`url('${inlinedAs("image/png", "fake")}')`);
   });
 
   it("preserves url() query strings and hash fragments during rebasing", async () => {
@@ -1289,7 +1300,70 @@ describe("bundleToSingleHtml", () => {
 
     const bundled = await bundleToSingleHtml(dir);
 
-    expect(bundled).toContain("url('styles/sprite.png?v=2#section')");
+    // The query/hash suffix rides along onto the inlined data URL.
+    expect(bundled).toContain(`url('${inlinedAs("image/png", "fake-sprite")}?v=2#section')`);
+  });
+
+  it("inlines fonts, images and scripts so no relative asset reference survives", async () => {
+    const dir = makeTempProject({
+      "index.html": `<!doctype html>
+<html><head>
+  <style>
+    @font-face { font-family: "Brand"; src: url('assets/fonts/brand.woff2') format('woff2'); }
+    .hero { background: url('assets/hero.jpg'); }
+  </style>
+</head><body>
+  <div data-composition-id="root" data-width="320" data-height="180">
+    <img id="logo" src="assets/logo.png" srcset="assets/logo2x.webp 2x">
+    <video id="clip" poster="assets/poster.gif"></video>
+  </div>
+  <script src="assets/app.js"></script>
+  <script>window.__timelines = window.__timelines || {}; window.__timelines.root = {}</script>
+</body></html>`,
+      "assets/fonts/brand.woff2": "font-bytes",
+      "assets/hero.jpg": "hero-bytes",
+      "assets/logo.png": "logo-bytes",
+      "assets/logo2x.webp": "logo2x-bytes",
+      "assets/poster.gif": "poster-bytes",
+      "assets/app.js": "window.__APP_LOADED__ = true;",
+    });
+
+    const bundled = await bundleToSingleHtml(dir);
+
+    // Each asset arrives as its own bytes, which is what proves its path
+    // resolved to the right file rather than merely being rewritten.
+    expect(bundled).toContain(inlinedAs("font/woff2", "font-bytes"));
+    expect(bundled).toContain(inlinedAs("image/jpeg", "hero-bytes"));
+    expect(bundled).toContain(inlinedAs("image/png", "logo-bytes"));
+    expect(bundled).toContain(inlinedAs("image/webp", "logo2x-bytes"));
+    expect(bundled).toContain(inlinedAs("image/gif", "poster-bytes"));
+    // A local classic script is folded in as source, not as a data: URL.
+    expect(bundled).toContain("window.__APP_LOADED__ = true;");
+
+    // Nothing still points into the sibling assets/ directory that a consumer
+    // storing this bundle as a lone file will not have.
+    expect(bundled).not.toMatch(/["'(]assets\//);
+  });
+
+  it("leaves an oversized asset relative and warns rather than inlining it", async () => {
+    const dir = makeTempProject({
+      "index.html": `<!doctype html>
+<html><body>
+  <div data-composition-id="root" data-width="320" data-height="180">
+    <img id="big" src="assets/huge.png">
+  </div>
+  <script>window.__timelines = window.__timelines || {}; window.__timelines.root = {}</script>
+</body></html>`,
+      "assets/huge.png": "x".repeat(2 * 1024 * 1024 + 1),
+    });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    const bundled = await bundleToSingleHtml(dir);
+
+    expect(bundled).toContain('src="assets/huge.png"');
+    expect(bundled).not.toContain("data:image/png");
+    expect(warn.mock.calls.flat().join(" ")).toContain("may not be self-contained");
+    warn.mockRestore();
   });
 
   it("deduplicates diamond @import (same file imported by two parents)", async () => {
@@ -1629,3 +1703,98 @@ describe("emitRootCompositionVariableStyles — <style> breakout", () => {
     expect(css).toContain("#ff0066");
   });
 });
+
+describe("nested script integrity", () => {
+  it("preserves and deduplicates a nested pin even when the root already loads that URL", async () => {
+    const src = "https://cdn.example.com/pinned.js";
+    const dir = makeTempProject({
+      "index.html": `<html><head><script src="${src}"></script></head><body><div data-composition-id="root" data-width="320" data-height="180" data-duration="1"><div data-composition-id="child" data-composition-src="child.html"></div></div></body></html>`,
+      "child.html": `<html><head><script src="${src}" integrity="sha384-YQ==" crossorigin="anonymous"></script></head><body><div data-composition-id="child" data-width="320" data-height="180" data-duration="1">Child</div></body></html>`,
+    });
+    try {
+      const bundled = await bundleToSingleHtml(dir);
+      const { document } = parseHTML(bundled);
+      const scripts = [...document.querySelectorAll("script[src]")].filter(
+        (el) => el.getAttribute("src") === src,
+      );
+      expect(scripts).toHaveLength(1);
+      expect(scripts[0]?.getAttribute("integrity")).toBe("sha384-YQ==");
+      expect(scripts[0]?.getAttribute("crossorigin")).toBe("anonymous");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+it("preserves every duplicate script pin and rejects conflicting requirements", () => {
+  const { document } = parseHTML(
+    '<html><body><script src="https://cdn.example.com/a.js"></script><script src="https://cdn.example.com/a.js"></script></body></html>',
+  );
+  const src = "https://cdn.example.com/a.js";
+  ensureExternalScriptTag(document, src, { integrity: "sha384-YQ==", crossorigin: "anonymous" });
+  ensureExternalScriptTag(document, src);
+  for (const el of document.querySelectorAll("script")) {
+    expect(el.getAttribute("integrity")).toBe("sha384-YQ==");
+    expect(el.getAttribute("crossorigin")).toBe("anonymous");
+  }
+  expect(() => ensureExternalScriptTag(document, src, { integrity: "sha384-Yg==" })).toThrow(
+    "Conflicting script integrity",
+  );
+});
+
+it("keeps protected local scripts external when hoisting an inline template", async () => {
+  const dir = makeTempProject({
+    "index.html": `<html><body><template id="child-template"><div data-composition-id="child" data-width="320" data-height="180"><script src="local.js" integrity="sha384-YQ==" crossorigin="anonymous"></script></div></template><div data-composition-id="root" data-width="320" data-height="180" data-duration="1"><div data-composition-id="child" data-start="0" data-duration="1"></div></div></body></html>`,
+    "local.js": "window.localPinWitness = true;",
+  });
+  try {
+    const bundled = await bundleToSingleHtml(dir);
+    const { document } = parseHTML(bundled);
+    const script = document.querySelector('script[src="local.js"]');
+    expect(script?.getAttribute("integrity")).toBe("sha384-YQ==");
+    expect(script?.getAttribute("crossorigin")).toBe("anonymous");
+    expect(bundled).not.toContain("window.localPinWitness = true;");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+it.each(["root", "sibling", "template"])(
+  "does not inline local bytes before a later %s integrity requirement",
+  async (placement) => {
+    const unpinned = '<script src="local.js"></script>';
+    const pinned =
+      '<script src="./local.js" integrity="sHa384-YQ==" crossorigin="anonymous"></script>';
+    const rootScript = placement === "root" ? unpinned : "";
+    const first =
+      placement === "sibling"
+        ? '<div data-composition-id="first" data-composition-src="first.html"></div>'
+        : "";
+    const templates =
+      placement === "template"
+        ? `<template id="first-template"><div data-composition-id="first">${unpinned}</div></template><template id="child-template"><div data-composition-id="child">${pinned}</div></template>`
+        : "";
+    const children =
+      placement === "template"
+        ? '<div data-composition-id="first" data-start="0" data-duration="1"></div><div data-composition-id="child" data-start="0" data-duration="1"></div>'
+        : `${first}<div data-composition-id="child" data-composition-src="child.html"></div>`;
+    const dir = makeTempProject({
+      "index.html": `<html><head>${rootScript}</head><body>${templates}<div data-composition-id="root" data-width="320" data-height="180" data-duration="1">${children}</div></body></html>`,
+      "first.html": `<html><head>${unpinned}</head><body><div data-composition-id="first" data-width="320" data-height="180" data-duration="1">First</div></body></html>`,
+      "child.html": `<html><head>${pinned}</head><body><div data-composition-id="child" data-width="320" data-height="180" data-duration="1">Child</div></body></html>`,
+      "local.js": "window.alteredLocalBytes = true;",
+    });
+    try {
+      const bundled = await bundleToSingleHtml(dir);
+      expect(bundled).not.toContain("window.alteredLocalBytes = true;");
+      const { document } = parseHTML(bundled);
+      const local = [...document.querySelectorAll("script[src]")].filter((el) =>
+        /local\.js$/.test(el.getAttribute("src") || ""),
+      );
+      expect(local.length).toBeGreaterThan(0);
+      for (const el of local) expect(el.getAttribute("integrity")).toBe("sha384-YQ==");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  },
+);

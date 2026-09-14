@@ -1,9 +1,14 @@
+import {
+  ensureExternalScriptTag,
+  readExternalScriptAttributes,
+  type ExternalScriptAttributes,
+} from "./externalScripts";
 import { markFlattenedInnerRoot } from "../runtime/flattenedRoot";
 export { FLATTENED_INNER_ROOT_STRIP_ATTRS } from "../runtime/flattenedRoot";
 import { parseHostVariableValues, warnUnknownEnumValues } from "../runtime/getVariables";
 import { sanitizeCssValue } from "../runtime/applyVariableBindings";
 import { cssVariableName } from "../tokenSlug";
-import { readFileSync, existsSync } from "fs";
+import { readFileSync, existsSync, statSync } from "fs";
 import { resolve, relative, dirname, isAbsolute, sep } from "path";
 import { CSS_URL_RE, isNonRelativeUrl } from "./assetPaths.js";
 import { transformSync } from "esbuild";
@@ -294,7 +299,53 @@ const INLINE_MIME: Record<string, string> = {
   ".txt": "text/plain",
   ".cube": "text/plain",
   ".xml": "application/xml",
+  // Fonts and raster images. A bundle handed to a consumer that stores it as a
+  // lone object — no sibling `assets/` directory — 404s on every surviving
+  // relative reference, and a missing font silently reflows the whole frame
+  // rather than failing loudly. Media (mp4/webm/mp3/wav) is deliberately absent:
+  // it is large, streamed rather than laid out, and its absence is obvious.
+  ".woff2": "font/woff2",
+  ".woff": "font/woff",
+  ".ttf": "font/ttf",
+  ".otf": "font/otf",
+  ".png": "image/png",
+  ".jpg": "image/jpeg",
+  ".jpeg": "image/jpeg",
+  ".gif": "image/gif",
+  ".webp": "image/webp",
+  ".avif": "image/avif",
 };
+
+/**
+ * Per-asset ceiling on base64 inlining.
+ *
+ * Base64 costs ~33% over the raw bytes, so an unbounded rule turns one careless
+ * 40 MB asset into a bundle no browser should be asked to parse. 2 MiB is
+ * measured against this repo's own assets rather than picked: the largest of
+ * 164 tracked `.woff2` files is 105 KB (p90 75 KB) and the largest of 284
+ * tracked raster images is 2.00 MB (p90 437 KB). So every font and effectively
+ * every image in-tree inlines, while a video-sized file cannot.
+ *
+ * Oversized assets keep their project-relative URL — correct wherever the
+ * bundle is served from its project directory, and warned about because that is
+ * exactly where "self-contained" stops being true.
+ */
+const MAX_INLINE_ASSET_BYTES = 2 * 1024 * 1024;
+
+function safeStatSize(filePath: string): number | null {
+  try {
+    return statSync(filePath).size;
+  } catch {
+    return null;
+  }
+}
+
+function warnAssetTooLargeToInline(assetPath: string, byteLength: number): void {
+  const mb = (byteLength / (1024 * 1024)).toFixed(1);
+  console.warn(
+    `[HyperFrames] Not inlining "${assetPath}" (${mb} MB exceeds the ${MAX_INLINE_ASSET_BYTES / (1024 * 1024)} MB inline limit). The bundle may not be self-contained.`,
+  );
+}
 
 function maybeInlineRelativeAssetUrl(urlValue: string, projectDir: string): string | null {
   if (!urlValue || !isRelativeUrl(urlValue)) return null;
@@ -305,6 +356,13 @@ function maybeInlineRelativeAssetUrl(urlValue: string, projectDir: string): stri
   const ext = filePath.toLowerCase().match(/\.[^.]+$/)?.[0] ?? "";
   const mimeType = INLINE_MIME[ext];
   if (!mimeType) return null;
+  // Size-check before reading: an oversized asset must not be pulled into memory
+  // just to be discarded.
+  const byteLength = safeStatSize(filePath);
+  if (byteLength !== null && byteLength > MAX_INLINE_ASSET_BYTES) {
+    warnAssetTooLargeToInline(basePath, byteLength);
+    return null;
+  }
   const content = safeReadFileBuffer(filePath);
   if (content == null) return null;
   const dataUrl = `data:${mimeType};base64,${content.toString("base64")}`;
@@ -719,14 +777,30 @@ export interface BundleOptions {
  * - Injects the HyperFrames runtime script
  * - Inlines local CSS and JS files
  * - Inlines sub-composition HTML fragments (data-composition-src)
- * - Inlines small textual assets as data URLs
+ * - Inlines textual assets, fonts and raster images as data URLs, up to a
+ *   per-asset size limit; audio/video and oversized assets keep their
+ *   project-relative URL and require the project directory to be served
  */
 
-function ensureExternalScriptTag(doc: Document, src: string): void {
-  if (queryByAttr(doc, "src", src, "script")) return;
-  const el = doc.createElement("script");
-  el.setAttribute("src", src);
-  doc.body.appendChild(el);
+type DeferredScriptChunk = string | (() => string);
+
+function preserveLocalScriptIntegrity(
+  doc: Document,
+  src: string,
+  resolvePath: (src: string) => string | null,
+): boolean {
+  const path = resolvePath(src);
+  if (!path) return false;
+  const pinned = [...doc.querySelectorAll("script[src][integrity]")].filter((el) => {
+    const candidate = el.getAttribute("src") || "";
+    return (
+      isRelativeUrl(candidate) &&
+      resolvePath(candidate) === path &&
+      el.getAttribute("integrity")?.trim()
+    );
+  });
+  for (const el of pinned) ensureExternalScriptTag(doc, src, readExternalScriptAttributes(el));
+  return pinned.length > 0;
 }
 
 function hoistExternalScript(
@@ -734,19 +808,29 @@ function hoistExternalScript(
   projectDir: string,
   doc: Document,
   seenSrcs: Set<string>,
-  chunks: string[],
+  chunks: DeferredScriptChunk[],
+  attributes: ExternalScriptAttributes,
 ): void {
+  if (attributes.integrity?.trim()) {
+    ensureExternalScriptTag(doc, src, attributes);
+    seenSrcs.add(src);
+    return;
+  }
   if (seenSrcs.has(src)) return;
   seenSrcs.add(src);
   if (!isNonRelativeUrl(src) && !isAbsolute(src)) {
     const jsPath = resolveWithinProject(projectDir, src);
     const js = jsPath ? safeReadFile(jsPath) : null;
     if (js != null) {
-      chunks.push(js);
+      chunks.push(() =>
+        preserveLocalScriptIntegrity(doc, src, (value) => resolveWithinProject(projectDir, value))
+          ? ""
+          : js,
+      );
       return;
     }
   }
-  ensureExternalScriptTag(doc, src);
+  ensureExternalScriptTag(doc, src, attributes);
 }
 
 function hoistCompositionScripts(
@@ -759,7 +843,7 @@ function hoistCompositionScripts(
     runtimeCompId: string | undefined;
     authoredRootId: string | undefined;
     seenCompScriptSrcs: Set<string>;
-    compScriptChunks: string[];
+    compScriptChunks: DeferredScriptChunk[];
   },
 ): void {
   for (const scriptEl of [...container.querySelectorAll("script")]) {
@@ -771,6 +855,7 @@ function hoistCompositionScripts(
         opts.document,
         opts.seenCompScriptSrcs,
         opts.compScriptChunks,
+        readExternalScriptAttributes(scriptEl),
       );
     } else {
       opts.compScriptChunks.push(
@@ -857,42 +942,6 @@ export async function bundleToSingleHtml(
     }
   }
 
-  // Inline local JS
-  const localJsChunks: string[] = [];
-  let jsAnchorPlaced = false;
-  for (const el of [...document.querySelectorAll("script[src]")]) {
-    const src = el.getAttribute("src");
-    if (!src || !isRelativeUrl(src)) continue;
-    // Module scripts can contain static imports whose resolution is relative
-    // to the script URL. Folding their source into a classic inline script
-    // both drops module semantics and changes the import base URL.
-    if ((el.getAttribute("type") || "").trim().toLowerCase() === "module") continue;
-    const jsPath = resolveEntryPath(src);
-    const js = jsPath ? safeReadFile(jsPath) : null;
-    if (js == null) continue;
-    localJsChunks.push(js);
-    if (!jsAnchorPlaced) {
-      const anchor = document.createElement("script");
-      anchor.setAttribute("data-hf-bundled-local-js", "1");
-      el.replaceWith(anchor);
-      jsAnchorPlaced = true;
-    } else {
-      el.remove();
-    }
-  }
-  if (localJsChunks.length > 0) {
-    const anchor = document.querySelector('script[data-hf-bundled-local-js="1"]');
-    const joinedJs = joinJsChunks(localJsChunks);
-    if (anchor) {
-      anchor.removeAttribute("data-hf-bundled-local-js");
-      anchor.textContent = joinedJs;
-    } else {
-      const script = document.createElement("script");
-      script.textContent = joinedJs;
-      document.body.appendChild(script);
-    }
-  }
-
   // Inline sub-compositions (via shared function)
   const trackedCompositionHosts = getBundledTrackedCompositionHosts(document);
   const hostIdentityByElement = assignBundledRuntimeCompositionIds(trackedCompositionHosts);
@@ -927,7 +976,7 @@ export async function bundleToSingleHtml(
     },
   });
   const compStyleChunks: string[] = [...subCompResult.styles];
-  const compScriptChunks: string[] = [];
+  const compScriptChunks: DeferredScriptChunk[] = [];
   const compExternalLinks = [...subCompResult.externalLinks];
   const compVariablesByComp: Record<string, Record<string, unknown>> = {
     ...subCompResult.variablesByComp,
@@ -939,21 +988,24 @@ export async function bundleToSingleHtml(
       continue;
     }
     const extSrc = scriptItem.src;
+    if (scriptItem.integrity?.trim()) {
+      ensureExternalScriptTag(document, extSrc, scriptItem);
+      seenCompScriptSrcs.add(extSrc);
+      continue;
+    }
     if (seenCompScriptSrcs.has(extSrc)) continue;
     seenCompScriptSrcs.add(extSrc);
     if (isRelativeUrl(extSrc)) {
       const jsPath = resolveEntryPath(extSrc);
       const js = jsPath ? safeReadFile(jsPath) : null;
       if (js != null) {
-        compScriptChunks.push(js);
+        compScriptChunks.push(() =>
+          preserveLocalScriptIntegrity(document, extSrc, resolveEntryPath) ? "" : js,
+        );
         continue;
       }
     }
-    if (!queryByAttr(document, "src", extSrc, "script")) {
-      const extScript = document.createElement("script");
-      extScript.setAttribute("src", extSrc);
-      document.body.appendChild(extScript);
-    }
+    ensureExternalScriptTag(document, extSrc, scriptItem);
   }
 
   // Inline template compositions: inject <template id="X-template"> content into
@@ -1068,6 +1120,43 @@ export async function bundleToSingleHtml(
     templateEl.remove();
   }
 
+  // Inline local JS
+  const localJsChunks: string[] = [];
+  let jsAnchorPlaced = false;
+  for (const el of [...document.querySelectorAll("script[src]")]) {
+    const src = el.getAttribute("src");
+    if (!src || !isRelativeUrl(src)) continue;
+    if (preserveLocalScriptIntegrity(document, src, resolveEntryPath)) continue;
+    // Module scripts can contain static imports whose resolution is relative
+    // to the script URL. Folding their source into a classic inline script
+    // both drops module semantics and changes the import base URL.
+    if ((el.getAttribute("type") || "").trim().toLowerCase() === "module") continue;
+    const jsPath = resolveEntryPath(src);
+    const js = jsPath ? safeReadFile(jsPath) : null;
+    if (js == null) continue;
+    localJsChunks.push(js);
+    if (!jsAnchorPlaced) {
+      const anchor = document.createElement("script");
+      anchor.setAttribute("data-hf-bundled-local-js", "1");
+      el.replaceWith(anchor);
+      jsAnchorPlaced = true;
+    } else {
+      el.remove();
+    }
+  }
+  if (localJsChunks.length > 0) {
+    const anchor = document.querySelector('script[data-hf-bundled-local-js="1"]');
+    const joinedJs = joinJsChunks(localJsChunks);
+    if (anchor) {
+      anchor.removeAttribute("data-hf-bundled-local-js");
+      anchor.textContent = joinedJs;
+    } else {
+      const script = document.createElement("script");
+      script.textContent = joinedJs;
+      document.body.appendChild(script);
+    }
+  }
+
   // Inject external scripts from sub-compositions (e.g., Lottie CDN)
   // that aren't already present in the main document.
   for (const link of compExternalLinks) {
@@ -1092,7 +1181,9 @@ export async function bundleToSingleHtml(
   }
   if (compScriptChunks.length) {
     const compScript = document.createElement("script");
-    compScript.textContent = joinJsChunks(compScriptChunks);
+    compScript.textContent = joinJsChunks(
+      compScriptChunks.map((chunk) => (typeof chunk === "string" ? chunk : chunk())),
+    );
     document.body.appendChild(compScript);
   }
 

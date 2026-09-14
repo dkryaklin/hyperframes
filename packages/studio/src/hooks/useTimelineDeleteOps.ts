@@ -1,3 +1,4 @@
+import { buildProjectApiPath } from "../utils/projectRouting";
 // Timeline clip deletion: the marquee/multi path and the single-clip wrapper
 // the context menu uses. Extracted verbatim from useTimelineEditing.ts to keep
 // it under the studio 600-line cap, following useTimelineAssetDropOps.
@@ -19,7 +20,6 @@ interface UseTimelineDeleteOpsOptions {
   showToast: (message: string, tone?: "error" | "info") => void;
   writeProjectFile: (path: string, content: string, expectedContent?: string) => Promise<void>;
   recordEdit: (input: RecordEditInput) => Promise<void>;
-  domEditSaveTimestampRef: MutableRefObject<number>;
   reloadPreview: () => void;
   isRecordingRef?: MutableRefObject<boolean>;
   forceReloadSdkSession?: () => void;
@@ -33,7 +33,6 @@ export function useTimelineDeleteOps({
   showToast,
   writeProjectFile,
   recordEdit,
-  domEditSaveTimestampRef,
   reloadPreview,
   isRecordingRef,
   forceReloadSdkSession,
@@ -76,7 +75,10 @@ export function useTimelineDeleteOps({
           }
 
           const removeResponse = await fetch(
-            `/api/projects/${pid}/file-mutations/remove-element/${encodeURIComponent(targetPath)}`,
+            buildProjectApiPath(
+              pid,
+              `/file-mutations/remove-element/${encodeURIComponent(targetPath)}`,
+            ),
             {
               method: "POST",
               headers: { "Content-Type": "application/json", ...studioWriteHeaders() },
@@ -107,7 +109,6 @@ export function useTimelineDeleteOps({
           usePlayerStore.getState().setDuration(deleteContentEnd);
         }
 
-        domEditSaveTimestampRef.current = Date.now();
         try {
           await saveProjectFilesWithHistory({
             projectId: pid,
@@ -150,7 +151,6 @@ export function useTimelineDeleteOps({
       showToast,
       timelineElements,
       writeProjectFile,
-      domEditSaveTimestampRef,
       reloadPreview,
       isRecordingRef,
       forceReloadSdkSession,

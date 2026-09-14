@@ -54,7 +54,14 @@ import { resolve, dirname, join, basename } from "node:path";
 import { execFileSync, spawn } from "node:child_process";
 import { loadProducer } from "../utils/producer.js";
 import { c } from "../ui/colors.js";
-import { formatBytes, formatRenderSummaryDetail, errorBox } from "../ui/format.js";
+import {
+  formatBytes,
+  formatRenderSummaryDetail,
+  formatRenderPipelineDetail,
+  formatScreenshotFallbackHint,
+  resolvePrintedCaptureMode,
+  errorBox,
+} from "../ui/format.js";
 import { warnIfWebmAlphaDropped } from "../utils/webmAlphaCheck.js";
 import { renderProgress } from "../ui/progress.js";
 import {
@@ -77,7 +84,11 @@ import { isDevMode } from "../utils/env.js";
 import { buildDockerRunArgs, resolveDockerPlatform } from "../utils/dockerRunArgs.js";
 import { normalizeErrorMessage } from "../utils/errorMessage.js";
 import { runEnvironmentChecks } from "../browser/preflight.js";
-import { detectH264EncoderMode } from "../browser/ffmpeg.js";
+import {
+  detectH264EncoderMode,
+  getFFmpegInstallHint,
+  H264EncoderUnavailableError,
+} from "../browser/ffmpeg.js";
 import { chromeLaunchRemediation } from "../browser/linuxDeps.js";
 import { macosOldChromeCrashRemediation } from "../browser/macosOldChromeCrash.js";
 import { windowsChromeCrashRemediation } from "../browser/windowsCrash.js";
@@ -87,7 +98,7 @@ import {
   runPostRenderStep,
   runPostRenderStepAsync,
 } from "../utils/render-success-state.js";
-import type { ProducerLogger, RenderJob } from "@hyperframes/producer";
+import type { ProducerLogger, RenderJob, RenderPerfSummary } from "@hyperframes/producer";
 import { EXTRACT_CACHE_DIR_DISABLED_ALIASES, type VideoFrameFormat } from "@hyperframes/engine";
 import {
   checkOutputResolutionCompatibility,
@@ -138,8 +149,9 @@ export default defineCommand({
     quality: {
       type: "string",
       alias: "q",
-      description: "Quality: draft, standard, high",
-      default: "standard",
+      description:
+        "Quality: draft, looks, delivery, or standard/high. looks is the default (CRF 16). delivery is high. MOV always uses the fixed alpha-preserving ProRes 4444 profile.",
+      default: "looks",
     },
     skill: {
       type: "string",
@@ -191,11 +203,13 @@ export default defineCommand({
     },
     crf: {
       type: "string",
-      description: "Override encoder CRF. Mutually exclusive with --video-bitrate.",
+      description:
+        "Override MP4/WebM encoder CRF. Mutually exclusive with --video-bitrate; unsupported for MOV.",
     },
     "video-bitrate": {
       type: "string",
-      description: "Target video bitrate such as 10M. Mutually exclusive with --crf.",
+      description:
+        "Target MP4/WebM video bitrate such as 10M. Mutually exclusive with --crf; unsupported for MOV.",
     },
     "vp9-cpu-used": {
       type: "string",
@@ -838,6 +852,16 @@ export async function renderLocal(
     try {
       encoderMode = detectH264EncoderMode(preflight.ffmpegPath, false);
     } catch (error) {
+      // HDR MP4 uses HEVC; auto mode cannot resolve the codec until sources
+      // have been inspected. Only forced SDR is definitely H.264 here.
+      if (error instanceof H264EncoderUnavailableError && options.hdrMode === "force-sdr") {
+        errorBox(
+          "MP4 H.264 encoder unavailable",
+          error.message,
+          `Install an FFmpeg build with libx264 support (${getFFmpegInstallHint()}), or render WebM instead: hyperframes render --format webm --output output.webm`,
+        );
+        failCommand();
+      }
       // Capability probing is advisory. Let the real encode surface the
       // authoritative FFmpeg error instead of failing here with a bare stack.
       if (!options.quiet) {
@@ -868,6 +892,13 @@ export async function renderLocal(
 
   const engineConfig = producer.resolveConfig({
     browserGpuMode: options.browserGpuMode ?? "software",
+    // Local auto opts out of the software-GPU screenshot clamp. Docker and
+    // --no-browser-gpu request software; --resolution supersamples via screenshot.
+    ...(options.browserGpuMode === "auto" &&
+    options.outputResolution == null &&
+    process.env.PRODUCER_FORCE_SCREENSHOT !== "true"
+      ? { forceScreenshot: false }
+      : {}),
     ...(options.pageNavigationTimeoutMs != null
       ? { pageNavigationTimeout: options.pageNavigationTimeoutMs }
       : {}),
@@ -944,8 +975,8 @@ export async function renderLocal(
       outputPath,
       elapsed,
       options.quiet,
-      job.perfSummary?.compositionDurationSeconds,
-      job.perfSummary?.totalFrames,
+      job.perfSummary,
+      options.browserGpuMode,
     ),
   );
   runPostRenderStep("warnIfWebmAlphaDropped", () =>
@@ -1550,6 +1581,7 @@ function trackRenderMetrics(
     deBlankRecaptures: perf?.drawElement?.blankRecaptures,
     deBoundaryFrames: perf?.drawElement?.boundaryFrames,
     deNcprFallbacks: perf?.drawElement?.ncprFallbacks,
+    deFrameTimeouts: perf?.drawElement?.frameTimeouts,
     compositionDurationMs,
     compositionWidth: perf?.resolution.width,
     compositionHeight: perf?.resolution.height,
@@ -1584,48 +1616,70 @@ function trackRenderMetrics(
   });
 }
 
+function readOutputFootprint(outputPath: string): { fileSize: string; isDirectory: boolean } {
+  try {
+    const stat = statSync(outputPath);
+    if (!stat.isDirectory()) return { fileSize: formatBytes(stat.size), isDirectory: false };
+    // png-sequence output is a directory; sum contained file sizes so the
+    // user sees the deliverable footprint, not the directory inode size.
+    let total = 0;
+    for (const entry of readdirSync(outputPath, { withFileTypes: true })) {
+      if (!entry.isFile()) continue;
+      try {
+        total += statSync(join(outputPath, entry.name)).size;
+      } catch {
+        // skip unreadable entries
+      }
+    }
+    return { fileSize: formatBytes(total), isDirectory: true };
+  } catch {
+    return { fileSize: "unknown", isDirectory: false };
+  }
+}
+
 function printRenderComplete(
   outputPath: string,
   elapsedMs: number,
   quiet: boolean,
-  outputDurationSeconds?: number,
-  frameCount?: number,
+  perf?: RenderPerfSummary,
+  requestedGpuMode?: "auto" | "hardware" | "software",
 ): void {
   if (quiet) return;
-
-  let fileSize = "unknown";
-  let isDirectory = false;
-  try {
-    const stat = statSync(outputPath);
-    isDirectory = stat.isDirectory();
-    if (stat.isDirectory()) {
-      // png-sequence output is a directory; sum the contained file sizes so
-      // the user sees the on-disk footprint of the deliverable rather than
-      // the platform-specific size of the directory inode itself.
-      let total = 0;
-      for (const entry of readdirSync(outputPath, { withFileTypes: true })) {
-        if (!entry.isFile()) continue;
-        try {
-          total += statSync(join(outputPath, entry.name)).size;
-        } catch {
-          // skip unreadable entries
-        }
-      }
-      fileSize = formatBytes(total);
-    } else {
-      fileSize = formatBytes(stat.size);
-    }
-  } catch {
-    // file doesn't exist or is inaccessible
-  }
-
+  const { fileSize, isDirectory } = readOutputFootprint(outputPath);
   const detail = formatRenderSummaryDetail({
     elapsedMs,
-    outputDurationSeconds,
+    outputDurationSeconds: perf?.compositionDurationSeconds,
     isDirectory,
-    frameCount,
+    frameCount: perf?.totalFrames,
   });
   console.log("");
   console.log(c.success("\u25C7") + "  " + c.accent(outputPath));
   console.log("   " + c.bold(fileSize) + c.dim(" \u00B7 " + detail));
+  if (perf) printRenderPipeline(perf, requestedGpuMode);
+}
+
+function printRenderPipeline(
+  perf: RenderPerfSummary,
+  requestedGpuMode?: "auto" | "hardware" | "software",
+): void {
+  // aggregateDrawElement reports "unknown" when no session recorded a mode.
+  const capture = {
+    captureMode: resolvePrintedCaptureMode(
+      perf.drawElement?.mode,
+      perf.observability?.capture.captureMode,
+    ),
+    browserGpuMode: perf.observability?.capture.browserGpuMode,
+  };
+  const pipeline = formatRenderPipelineDetail({
+    ...capture,
+    streamingEncode: perf.observability?.capture.useStreamingEncode,
+    stages: perf.stages,
+  });
+  if (pipeline) console.log("   " + c.dim(pipeline));
+  const hint = formatScreenshotFallbackHint({
+    ...capture,
+    requestedGpuMode,
+    platform: process.platform,
+  });
+  if (hint) console.log("   " + c.dim(hint));
 }

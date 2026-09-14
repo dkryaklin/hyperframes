@@ -1,3 +1,4 @@
+import { buildProjectApiPath } from "./projectRouting";
 import type { MutableRefObject } from "react";
 import type { EditHistoryKind } from "./editHistory";
 import { serializeStudioFileMutations } from "./studioFileMutationCoordinator";
@@ -15,7 +16,6 @@ export interface DomEditCommitBaseParams {
   activeCompPath: string | null;
   showToast: (message: string, tone?: "error" | "info") => void;
   writeProjectFile: ProjectFileWriter;
-  domEditSaveTimestampRef: MutableRefObject<number>;
   editHistory: { recordEdit: (entry: RecordEditInput) => Promise<void> };
   projectIdRef: MutableRefObject<string | null>;
   reloadPreview: () => void;
@@ -52,7 +52,7 @@ interface SaveProjectFilesWithHistoryInput {
 }
 
 export async function readProjectFileContent(pid: string, path: string): Promise<string> {
-  const response = await fetch(`/api/projects/${pid}/files/${encodeURIComponent(path)}`);
+  const response = await fetch(buildProjectApiPath(pid, `/files/${encodeURIComponent(path)}`));
   if (!response.ok) {
     throw await createStudioSaveHttpError(response, `Failed to read ${path}`);
   }

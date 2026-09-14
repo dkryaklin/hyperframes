@@ -1,11 +1,26 @@
+import { buildProjectApiPath } from "../../utils/projectRouting";
 import { forwardRef, useEffect, useRef, useState } from "react";
 import { isLottieAnimationLoaded } from "@hyperframes/core/runtime/lottie-readiness";
 import { useMountEffect } from "../../hooks/useMountEffect";
 import { applyPreviewVariablesToUrl } from "../../hooks/previewVariablesStore";
 import { HyperframesLoader } from "../../components/ui";
-// NOTE: importing "@hyperframes/player" registers a class extending HTMLElement
-// at module load, which throws under SSR. Defer the import to the mount effect
-// so it only runs in the browser.
+// Importing "@hyperframes/player" registers a class extending HTMLElement at
+// module load, which throws under SSR, hence the dynamic import behind a
+// `typeof window` guard. Kicking it here rather than in the mount effect puts
+// the chunk request in flight before the shell's first layout. Clearing the memo
+// on rejection stops one failure poisoning every later mount; the browser's
+// module map still caches a failed fetch, so recovery is a page reload.
+let playerModule: Promise<unknown> | null = null;
+
+export function loadPlayerModule(): Promise<unknown> {
+  playerModule ??= import("@hyperframes/player").catch((err: unknown) => {
+    playerModule = null;
+    throw err;
+  });
+  return playerModule;
+}
+
+if (typeof window !== "undefined") void loadPlayerModule().catch(() => {});
 
 interface PlayerProps {
   projectId?: string;
@@ -158,19 +173,19 @@ export const Player = forwardRef<HTMLIFrameElement, PlayerProps>(
       const container = containerRef.current;
       if (!container) return;
 
+      const previewSource =
+        directUrl || (projectId ? buildProjectApiPath(projectId, "/preview") : null);
+      if (!previewSource) return;
+
       let canceled = false;
       let cleanup: (() => void) | undefined;
 
-      // Dynamic import registers the custom element in the browser only.
-      import("@hyperframes/player").then(() => {
+      void loadPlayerModule().then(() => {
         if (canceled) return;
 
         // Create the web component imperatively to avoid JSX custom-element typing.
         const player = document.createElement("hyperframes-player") as HyperframesPlayerElement;
-        const srcUrl = new URL(
-          directUrl || `/api/projects/${projectId}/preview`,
-          window.location.origin,
-        );
+        const srcUrl = new URL(previewSource, window.location.origin);
         applyPreviewVariablesToUrl(srcUrl);
         const src = srcUrl.pathname + srcUrl.search;
         const retryPreview = () => {

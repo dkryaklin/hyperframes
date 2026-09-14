@@ -34,9 +34,8 @@ export const TIMELINE_REGISTRY_ASSIGN_PATTERN =
 // missed `window.__timelines[spec.id] = tl`, a pattern the shipped
 // code-particle-assemble/code-3d-extrude registry blocks actually use,
 // making gsap_timeline_not_registered false-fire on correctly registered
-// timelines. The computed-key alternative is deliberately non-capturing:
-// its text isn't a literal composition id, so callers reading group 1/2
-// (readRegisteredTimelineCompositionId) must keep falling back to null for it.
+// timelines. The computed-key alternative is non-capturing; remaining
+// callers only `.test()` this pattern.
 export const WINDOW_TIMELINE_ASSIGN_PATTERN =
   /window\.__timelines(?:\[\s*(?:["']([^"']+)["']|[A-Za-z_$][\w$.]*)\s*\]|\.\s*([A-Za-z_$][\w$]*))\s*=\s*([A-Za-z_$][\w$]*)/i;
 export const INVALID_SCRIPT_CLOSE_PATTERN = /<script[^>]*>[\s\S]*?<\s*\/\s*script(?!>)/i;
@@ -164,6 +163,34 @@ export function findRootTag(source: string, parsedTags?: readonly OpenTag[]): Op
     return tag;
   }
   return null;
+}
+
+/**
+ * Whether a tag's attribute text contains a `<` outside any quoted value.
+ *
+ * A legitimate attribute value may itself contain a raw `<` (e.g.
+ * `data-expr="x < y"`) — that's fine, htmlparser2 (and browsers) parse it as
+ * ordinary attribute text. But a `<` OUTSIDE any quotes means a following
+ * start tag never got its own `<`: the HTML tokenizer swallowed it as bogus
+ * attribute-name text on the tag currently open, and the intended element
+ * never becomes a real node. `<img src="a.png" <div class="hl">` is exactly
+ * this: `attrs` comes back as ` src="a.png" <div class="hl"` and the `.hl`
+ * div silently never renders.
+ */
+export function hasUnquotedLessThan(attrs: string): boolean {
+  let quote: '"' | "'" | null = null;
+  for (const ch of attrs) {
+    if (quote) {
+      if (ch === quote) quote = null;
+      continue;
+    }
+    if (ch === '"' || ch === "'") {
+      quote = ch;
+    } else if (ch === "<") {
+      return true;
+    }
+  }
+  return false;
 }
 
 export function readAttr(tagSource: string, attr: string): string | null {

@@ -87,6 +87,72 @@ describe("scrubPreviewAudio", () => {
     expect(audio.volume).toBeCloseTo(0.1);
     stopScrubPreviewAudio();
   });
+
+  /**
+   * The preview document is a different realm, so `instanceof HTMLAudioElement`
+   * is false for every node in it. That threw the `musicId` hint away and left
+   * the first `<audio>` in the document as the only route — and the first
+   * `<audio>` is often the voiceover, so scrubbing previewed the wrong track.
+   * Two elements, music second, is what tells the two paths apart: with one
+   * element the fallback reaches the right node by accident.
+   */
+  it("previews the track named by musicId, not the first audio in the document", () => {
+    const iframe = document.createElement("iframe");
+    document.body.append(iframe);
+    const previewDoc = iframe.contentDocument;
+    if (!previewDoc?.body) throw new Error("expected an iframe document");
+
+    const voiceover = previewDoc.createElement("audio");
+    voiceover.id = "voiceover";
+    voiceover.play = vi.fn(async () => {});
+    voiceover.pause = vi.fn();
+
+    const music = previewDoc.createElement("audio");
+    music.id = "music-bed";
+    music.play = vi.fn(async () => {});
+    music.pause = vi.fn();
+
+    previewDoc.body.append(voiceover, music);
+
+    // The node really is cross-realm; this is the condition, not a contrivance.
+    expect(music instanceof HTMLAudioElement).toBe(false);
+
+    scrubPreviewAudio(iframe, 0.5, "music-bed", 1);
+
+    expect(music.play).toHaveBeenCalled();
+    expect(voiceover.play).not.toHaveBeenCalled();
+    stopScrubPreviewAudio();
+  });
+
+  /** A scrub audition is media running under a paused clock, which the runtime now
+   *  stops on sight. So it borrows the element. That a leased element survives the
+   *  tick is asserted runtime-side in core's `transportPark.test.ts`; here the
+   *  contract is that the hook is called with the right element and given back. */
+  it("borrows the element from the runtime for the audition and returns it on stop", () => {
+    const iframe = document.createElement("iframe");
+    document.body.append(iframe);
+    const previewDoc = iframe.contentDocument;
+    if (!previewDoc?.body) throw new Error("expected an iframe document");
+
+    const music = previewDoc.createElement("audio");
+    music.id = "music";
+    music.play = vi.fn(async () => {});
+    music.pause = vi.fn();
+    previewDoc.body.append(music);
+
+    const leasePausedMedia = vi.fn();
+    const releasePausedMedia = vi.fn();
+    (previewDoc.defaultView as IframeWindow).__hf = { leasePausedMedia, releasePausedMedia };
+
+    scrubPreviewAudio(iframe, 0.5, "music", 1);
+
+    expect(leasePausedMedia).toHaveBeenCalledWith(music);
+    expect(releasePausedMedia).not.toHaveBeenCalled();
+
+    stopScrubPreviewAudio();
+
+    expect(releasePausedMedia).toHaveBeenCalledWith(music);
+  });
 });
 
 describe("applyPreviewAudioFlags", () => {
