@@ -1,8 +1,4 @@
-import { colordx, extend } from "@colordx/core";
-import names from "@colordx/core/plugins/names";
 import { roundToCenti } from "../../utils/rounding";
-
-extend([names]);
 
 export interface ParsedColor {
   red: number;
@@ -33,16 +29,103 @@ function formatAlpha(value: number): string {
   return `${roundToCenti(clampAlpha(value))}`;
 }
 
-export function parseCssColor(value: string): ParsedColor | null {
-  const color = colordx(value.trim());
-  if (!color.isValid()) return null;
-  const { r, g, b, alpha } = color.toRgb();
+function parseComponent(value: string, scale: number): number {
+  return value.endsWith("%") ? (Number(value.slice(0, -1)) * scale) / 100 : Number(value);
+}
+
+function parseSerializedColor(value: string): ParsedColor | null {
+  const trimmed = value.trim().toLowerCase();
+  if (!trimmed) return null;
+  if (trimmed === "transparent") {
+    return { red: 0, green: 0, blue: 0, alpha: 0 };
+  }
+
+  const hex = trimmed.match(/^#([0-9a-f]{3,4}|[0-9a-f]{6}|[0-9a-f]{8})$/);
+  if (hex) {
+    const digits = hex[1].length <= 4 ? [...hex[1]].map((digit) => digit + digit).join("") : hex[1];
+    return {
+      red: Number.parseInt(digits.slice(0, 2), 16),
+      green: Number.parseInt(digits.slice(2, 4), 16),
+      blue: Number.parseInt(digits.slice(4, 6), 16),
+      alpha: digits.length === 8 ? Number.parseInt(digits.slice(6, 8), 16) / 255 : 1,
+    };
+  }
+
+  const rgba =
+    trimmed.match(
+      /^rgba?\(\s*(\d*\.?\d+)\s*,\s*(\d*\.?\d+)\s*,\s*(\d*\.?\d+)(?:\s*,\s*(\d*\.?\d+))?\s*\)$/,
+    ) ??
+    trimmed.match(
+      /^rgba?\(\s*(\d*\.?\d+%?)\s+(\d*\.?\d+%?)\s+(\d*\.?\d+%?)(?:\s*\/\s*(\d*\.?\d+%?))?\s*\)$/,
+    );
+  if (rgba) {
+    return {
+      red: clampChannel(parseComponent(rgba[1], 255)),
+      green: clampChannel(parseComponent(rgba[2], 255)),
+      blue: clampChannel(parseComponent(rgba[3], 255)),
+      alpha: clampAlpha(rgba[4] != null ? parseComponent(rgba[4], 1) : 1),
+    };
+  }
+
+  return null;
+}
+
+let colorContext: CanvasRenderingContext2D | null = null;
+
+function canResolveInBrowser(value: string): boolean {
+  return (
+    typeof document !== "undefined" &&
+    typeof CSS !== "undefined" &&
+    CSS.supports("color", value) &&
+    !/\bcurrentcolor\b|\bvar\s*\(/i.test(value)
+  );
+}
+
+function parseBrowserColor(value: string): ParsedColor | null {
+  if (!canResolveInBrowser(value)) return null;
+  try {
+    colorContext ??= document.createElement("canvas").getContext("2d");
+    if (!colorContext) return null;
+    return (
+      parseCanvasColor(colorContext, `color(from ${value} srgb r g b / alpha)`) ??
+      parseCanvasColor(colorContext, value)
+    );
+  } catch {
+    return null;
+  }
+}
+
+function parseCanvasColor(context: CanvasRenderingContext2D, value: string): ParsedColor | null {
+  const serialized = readCanvasColor(context, value);
+  if (serialized === null) return null;
+  return parseSrgbSerialization(serialized) ?? parseSerializedColor(serialized);
+}
+
+function readCanvasColor(context: CanvasRenderingContext2D, value: string): string | null {
+  context.fillStyle = "#000000";
+  context.fillStyle = value;
+  const serialized = context.fillStyle;
+  context.fillStyle = "#ffffff";
+  context.fillStyle = value;
+  return typeof serialized === "string" && serialized === context.fillStyle ? serialized : null;
+}
+
+function parseSrgbSerialization(serialized: string): ParsedColor | null {
+  const match = serialized.match(/^color\(srgb ([^ ]+) ([^ ]+) ([^ /)]+)(?: \/ ([^)]+))?\)$/);
+  if (!match) return null;
+  const channels = match.slice(1, 4).map(Number);
+  const alpha = match[4] === undefined ? 1 : Number(match[4]);
+  if (!channels.every(Number.isFinite) || !Number.isFinite(alpha)) return null;
   return {
-    red: clampChannel(r),
-    green: clampChannel(g),
-    blue: clampChannel(b),
+    red: clampChannel(channels[0] * 255),
+    green: clampChannel(channels[1] * 255),
+    blue: clampChannel(channels[2] * 255),
     alpha: clampAlpha(alpha),
   };
+}
+
+export function parseCssColor(value: string): ParsedColor | null {
+  return parseSerializedColor(value) ?? parseBrowserColor(value.trim());
 }
 
 export function toColorPickerValue(value: string): string {

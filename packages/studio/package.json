@@ -52,6 +52,7 @@
     "test:webmcp-edit-loop": "node tests/e2e/webmcp-edit-loop.mjs",
     "test:timeline-virtualization": "TIMELINE_ROW_VIRTUALIZATION=on TIMELINE_ELEMENT_COUNT=50000 node tests/e2e/timeline-virtualization.mjs",
     "test:watch": "vitest",
+    "test:colors:browser": "node tests/e2e/native-css-colors.mjs",
     "report:sdk-cutover": "bun src/utils/sdkCutoverPolicy.report.ts",
     "test:timeline-default": "bun run test:timeline-virtualization"
   },
@@ -67,7 +68,6 @@
     "@codemirror/state": "^6.6.0",
     "@codemirror/theme-one-dark": "^6.1.2",
     "@codemirror/view": "6.40.0",
-    "@colordx/core": "^6.4.0",
     "@hyperframes/core": "workspace:*",
     "@hyperframes/parsers": "workspace:*",
     "@hyperframes/player": "workspace:*",
